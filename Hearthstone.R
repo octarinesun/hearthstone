@@ -114,10 +114,10 @@ fullCardRecord.selects<-fullCardRecord[fullCardRecord$isSelected==1,]
 # ggplot()+geom_point(data=winDependencies,aes(wins,deckCost.mean))
 
 winDependencies.byID<-ddply(fullCardRecord.selects,"arenaId",summarise,
-                       deckCost.median=median(cardCost),
-                       deckCost.mean=mean(cardCost),
-                       deckRarity=mean(cardRarity.x)
-                       )
+                            deckCost.median=median(cardCost),
+                            deckCost.mean=mean(cardCost),
+                            deckRarity=mean(cardRarity.x)
+)
 
 winDependencies.byID<-left_join(winDependencies.byID,arenaRecords.abbr,by="arenaId")
 winDependencies.byID$winRate<-winDependencies.byID$wins/(winDependencies.byID$wins+winDependencies.byID$losses)
@@ -127,7 +127,14 @@ ggplot()+geom_point(data=winDependencies.byID,aes(wins,deckCost.mean))
 
 ## Add a Taunts Column (0,1) if that card has taunt
 ### Find out the median cost of taunt cards and split the taunt values to early or late game taunt
+findAttribute<-function(df,attribute){
+  if(grepl(attribute,df$cardText,ignore.case=T) & !grepl("with",df$cardText,ignore.case=T)){
+    1
+  }
+}
+fullCardRecord.selects$hasTaunt<-findAttribute(fullCardRecord.selects,"Taunt")
 
+sapply(fullCardRecord.selects,function(x) x$hasTaunt<-findAttribute(x,"Taunt"))
 ## Add a Draw Column (0,1)
 ### Find the median of draw cards to split the draw values by early or late game draw
 
@@ -148,23 +155,23 @@ mostPicked<-arrange(mostPicked[mostPicked$type=="Minion",],desc(percentPicked))
 #### ----- look at the top 10 winners and losers
 cardPool.winners<-cardPool.abbr[cardPool.abbr$wins %in% 10:12,]
 mostPicked.winners<-ddply(cardPool.winners,"cardId",summarise,
-                  name=unique(cardName),
-                  type=unique(cardType),
-                  class=unique(cardClass),
-                  timesPicked=sum(isSelected==1),
-                  timesSeen=length(cardId),
-                  percentPicked=timesPicked/timesSeen
-)
-mostPicked.winners.sort<-arrange(mostPicked.winners[mostPicked.winners$type=="Weapon",],desc(percentPicked))[1:10,]
-
-cardPool.losers<-cardPool.abbr[cardPool.abbr$wins %in% 0:3,]
-mostPicked.losers<-ddply(cardPool.losers,"cardId",summarise,
                           name=unique(cardName),
                           type=unique(cardType),
                           class=unique(cardClass),
                           timesPicked=sum(isSelected==1),
                           timesSeen=length(cardId),
                           percentPicked=timesPicked/timesSeen
+)
+mostPicked.winners.sort<-arrange(mostPicked.winners[mostPicked.winners$type=="Weapon",],desc(percentPicked))[1:10,]
+
+cardPool.losers<-cardPool.abbr[cardPool.abbr$wins %in% 0:3,]
+mostPicked.losers<-ddply(cardPool.losers,"cardId",summarise,
+                         name=unique(cardName),
+                         type=unique(cardType),
+                         class=unique(cardClass),
+                         timesPicked=sum(isSelected==1),
+                         timesSeen=length(cardId),
+                         percentPicked=timesPicked/timesSeen
 )
 mostPicked.losers.sort<-arrange(mostPicked.losers[mostPicked.losers$type=="Weapon",],desc(percentPicked))[1:10,]
 
@@ -199,22 +206,22 @@ wholeSet.inc<-merge(deckDetails.inc,arenaRecords.abbr,sort=F)
 wholeSet.inc<-select(wholeSet.inc,-retire)
 
 winDependencies<-ddply(wholeSet.inc,"wins",summarise,
-                 deckCost.median=median(cardCost),
-                 deckCost.mean=mean(cardCost),
-                 deckRarity=mean(cardRarity),
-                 classCards=length(cardClass!=0),
-                 draw=sum(grepl(pattern="Draw",cardText))
-                 )
+                       deckCost.median=median(cardCost),
+                       deckCost.mean=mean(cardCost),
+                       deckRarity=mean(cardRarity),
+                       classCards=length(cardClass!=0),
+                       draw=sum(grepl(pattern="Draw",cardText))
+)
 ggplot()+geom_point(data=winDependencies,aes(wins,deckRarity))
 ggplot()+geom_point(data=winDependencies,aes(wins,deckCost.mean))
 
 winDependencies<-ddply(wholeSet.inc,"arenaId",summarise,
-      deckCost.median=median(cardCost),
-      deckCost.mean=mean(cardCost),
-      deckRarity=mean(cardRarity),
-      classCards=sum(cardClass!=0),
-      draw=sum(grepl(pattern="Draw",cardText)),
-      wins=median(wins)
+                       deckCost.median=median(cardCost),
+                       deckCost.mean=mean(cardCost),
+                       deckRarity=mean(cardRarity),
+                       classCards=sum(cardClass!=0),
+                       draw=sum(grepl(pattern="Draw",cardText)),
+                       wins=median(wins)
 )
 
 ggplot()+geom_point(data=winDependencies,aes(wins,classCards))
