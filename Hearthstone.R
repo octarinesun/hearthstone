@@ -34,6 +34,30 @@ hist(stockCards.abbr$cardCost)
 stockCards.abbr$cardType<-factor(stockCards.abbr$cardType,levels=c(1,2,3),labels=c("Minion","Spell","Weapon"))
 summary(stockCards.abbr$cardType)
 
+#### Code in Card Attributes
+## Add a Taunt Column
+hasTaunt<-lapply(stockCards.abbr$cardText,function(x) 
+  grepl("Taunt",x,ignore.case=T) & !grepl("destroy",x,ignore.case=T))
+hasTaunt<-unlist(hasTaunt)
+
+## Add a Draw Column (0,1)
+### Find the median of draw cards to split the draw values by early or late game draw
+hasDraw<-lapply(stockCards.abbr$cardText,function(x) 
+  grepl("Draw",x,ignore.case=T))
+hasDraw<-unlist(hasDraw)
+
+## Add Destroy column
+hasDestroy<-lapply(stockCards.abbr$cardText,function(x) 
+  (grepl("Destroy",x,ignore.case=T) & grepl("minion",x,ignore.case=T)))
+hasDestroy<-unlist(hasDestroy)
+
+## Affects all enemies
+hasAOEdmg<-lapply(stockCards.abbr$cardText,function(x) 
+  grepl("damage",x,ignore.case=T) & grepl("ALL",x,ignore.case=T))
+hasAOEdmg<-unlist(hasAOEdmg)
+
+stockCards.abbr<-cbind(stockCards.abbr,hasTaunt,hasDraw,hasDestroy,hasAOEdmg)
+
 # Breakdown card attributes (Taunt, Damage character, Damage minion,Deathrattle:,Draw)
 # grep(stockCards.abbr$cardText,pattern="Battlecry:")
 # grep(stockCards.abbr$cardText,pattern="Deathrattle:")
@@ -47,7 +71,7 @@ summary(stockCards.abbr$cardType)
 
 # First get the complete decks
 arenaDraftPool.full<-dbGetQuery(con, "SELECT * FROM arenaDraftRow")
-completeDecks.arenaIDs<-with(arenaDraftPool.full, unique(arenaId[pickNum==30]))
+# completeDecks.arenaIDs<-with(arenaDraftPool.full, unique(arenaId[pickNum==30]))
 
 # There are this many complete decks in the data set
 numCompleteDecks<-length(completeDecks.arenaIDs)
@@ -65,6 +89,7 @@ arenaRecords.abbr<-select(arenaRecords.full,arenaId:arenaClassId,wins=arenaOffic
 # Exploratory: what is the spread of arena wins
 head(arenaRecords.full)
 hist(arenaRecords.abbr$wins)
+rm(arenaRecords.full)
 
 # what percentage of early retires
 sum(arenaRecords.abbr$retire)/nrow(arenaRecords.abbr)
@@ -76,11 +101,11 @@ sum(arenaRecords.abbr$retire)/nrow(arenaRecords.abbr)
 nrow(arenaRecords.abbr[arenaRecords.abbr$arenaId %in% completeDecks.arenaIDs,])
 head(arenaRecords.abbr[arenaRecords.abbr$arenaId %in% completeDecks.arenaIDs,])
 
-##### take the 
-arenaDraftCards.full<-dbGetQuery(con, "SELECT * FROM arenaDraftCards")
-selectedDraftCards<-select(arenaDraftCards.full[which(arenaDraftCards.full$isSelected==1),],arenaId,cardId,pickNum)
 
-length(intersect(arenaRecords.abbr$arenaId,completeDecks.arenaIDs))
+arenaDraftCards.full<-dbGetQuery(con, "SELECT * FROM arenaDraftCards")
+# selectedDraftCards<-select(arenaDraftCards.full[which(arenaDraftCards.full$isSelected==1),],arenaId,cardId,pickNum)
+# 
+# length(intersect(arenaRecords.abbr$arenaId,completeDecks.arenaIDs))
 
 
 # fullCardRecord<-merge(arenaDraftPool.full,arenaDraftCards.full,by="rowId")
@@ -88,7 +113,7 @@ length(intersect(arenaRecords.abbr$arenaId,completeDecks.arenaIDs))
 # fullCardRecord<-load("fullCardRecord")
 
 fullCardRecord<-left_join(arenaDraftPool.full,arenaDraftCards.full,by="rowId")
-
+rm(arenaDraftCards.full)
 fullCardRecord<-left_join(fullCardRecord,stockCards.abbr,by="cardId")
 
 # Remove extraneous columns
@@ -99,15 +124,16 @@ fullCardRecord<-fullCardRecord[!is.na(fullCardRecord$wins),]
 
 ########### Only deal with selected cards
 fullCardRecord.selects<-fullCardRecord[fullCardRecord$isSelected==1,]
-
+rm(fullCardRecord)
 ## for now, omit the records
 # fullCardRecord.selects<-left_join(fullCardRecord.selects,arenaRecords.abbr,by="arenaId")
 
 # winDependencies.byWins<-ddply(fullCardRecord.selects,"wins",summarise,
 #                        deckCost.median=median(cardCost),
 #                        deckCost.mean=mean(cardCost),
-#                        deckRarity=mean(cardRarity.x),
-#                        testGrep=sum(grepl("Taunt",cardText))
+#                        deckRarity=mean(cardRarity.x)
+#                        meanTaunt=mean(hasTaunt),
+#                        meanTaunt=mean(hasTaunt),
 #                        )
 # 
 # ggplot()+geom_point(data=winDependencies,aes(wins,deckRarity))
@@ -116,28 +142,26 @@ fullCardRecord.selects<-fullCardRecord[fullCardRecord$isSelected==1,]
 winDependencies.byID<-ddply(fullCardRecord.selects,"arenaId",summarise,
                             deckCost.median=median(cardCost),
                             deckCost.mean=mean(cardCost),
-                            deckRarity=mean(cardRarity.x)
+                            deckRarity=mean(cardRarity.x),
+                            tauntCount=sum(hasTaunt),
+                            drawCount=sum(hasDraw),
+                            destroyCount=sum(hasDestroy),
+                            aoeCount=sum(hasAOEdmg)
 )
 
 winDependencies.byID<-left_join(winDependencies.byID,arenaRecords.abbr,by="arenaId")
 winDependencies.byID$winRate<-winDependencies.byID$wins/(winDependencies.byID$wins+winDependencies.byID$losses)
 
-ggplot()+geom_point(data=winDependencies.byID,aes(wins,deckRarity))
+ggplot()+geom_point(data=winDependencies.byID,aes(wins,drawCount))
 ggplot()+geom_point(data=winDependencies.byID,aes(wins,deckCost.mean))
 
-## Add a Taunts Column (0,1) if that card has taunt
-### Find out the median cost of taunt cards and split the taunt values to early or late game taunt
-findAttribute<-function(df,attribute){
-  if(grepl(attribute,df$cardText,ignore.case=T) & !grepl("with",df$cardText,ignore.case=T)){
-    1
-  }
-}
-fullCardRecord.selects$hasTaunt<-findAttribute(fullCardRecord.selects,"Taunt")
-
-sapply(fullCardRecord.selects,function(x) x$hasTaunt<-findAttribute(x,"Taunt"))
-## Add a Draw Column (0,1)
-### Find the median of draw cards to split the draw values by early or late game draw
-
+winDependencies.byWins<-ddply(winDependencies.byID,"wins",summarise,
+                              meanTaunt=mean(tauntCount),
+                              meanDraw=mean(drawCount),
+                              meanDestroy=mean(destroyCount),
+                              meanAOE=mean(aoeCount)
+)
+ggplot()+geom_point(data=winDependencies.byWins,aes(wins,meanTaunt))
 
 ############ Rank Cards by how often they are picked
 cardPool.abbr<-select(fullCardRecord,cardName,cardId,cardSet,cardType,cardClass,isSelected,wins)
