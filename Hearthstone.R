@@ -56,16 +56,12 @@ hasAOEdmg<-lapply(stockCards.abbr$cardText,function(x)
   grepl("damage",x,ignore.case=T) & grepl("ALL",x,ignore.case=T))
 hasAOEdmg<-unlist(hasAOEdmg)
 
-stockCards.abbr<-cbind(stockCards.abbr,hasTaunt,hasDraw,hasDestroy,hasAOEdmg)
+## Affects all enemies
+hasSilence<-lapply(stockCards.abbr$cardText,function(x) 
+  grepl("silence",x,ignore.case=T))
+hasSilence<-unlist(hasSilence)
 
-# Breakdown card attributes (Taunt, Damage character, Damage minion,Deathrattle:,Draw)
-# grep(stockCards.abbr$cardText,pattern="Battlecry:")
-# grep(stockCards.abbr$cardText,pattern="Deathrattle:")
-# grep(stockCards.abbr$cardText,pattern="Taunt")
-# grep(stockCards.abbr$cardText,pattern="all")
-# stockCards.abbr[grep(stockCards.abbr$cardText,pattern="deal"),]
-# stockCards.abbr[grep(stockCards.abbr$cardText,pattern="Draw"),]
-# grep(stockCards.abbr$cardText,pattern="Silence")
+stockCards.abbr<-cbind(stockCards.abbr,hasTaunt,hasDraw,hasDestroy,hasAOEdmg,hasSilence)
 
 # Need official arena wins for games that did not retire early and contain data for deck selection
 
@@ -146,21 +142,21 @@ winDependencies.byID<-ddply(fullCardRecord.selects,"arenaId",summarise,
                             tauntCount=sum(hasTaunt),
                             drawCount=sum(hasDraw),
                             destroyCount=sum(hasDestroy),
-                            aoeCount=sum(hasAOEdmg)
+                            aoeCount=sum(hasAOEdmg),
+                            silenceCount=sum(hasSilence)
 )
-
-winDependencies.byID<-left_join(winDependencies.byID,arenaRecords.abbr,by="arenaId")
-winDependencies.byID$winRate<-winDependencies.byID$wins/(winDependencies.byID$wins+winDependencies.byID$losses)
-
-ggplot()+geom_point(data=winDependencies.byID,aes(wins,drawCount))
-ggplot()+geom_point(data=winDependencies.byID,aes(wins,deckCost.mean))
 
 winDependencies.byWins<-ddply(winDependencies.byID,"wins",summarise,
                               meanTaunt=mean(tauntCount),
                               meanDraw=mean(drawCount),
                               meanDestroy=mean(destroyCount),
-                              meanAOE=mean(aoeCount)
+                              meanAOE=mean(aoeCount),
+                              meanSilence=mean(silenceCount)
 )
+
+winDependencies.byID<-left_join(winDependencies.byID,arenaRecords.abbr,by="arenaId")
+winDependencies.byID$winRate<-winDependencies.byID$wins/(winDependencies.byID$wins+winDependencies.byID$losses)
+
 ggplot()+geom_point(data=winDependencies.byWins,aes(wins,meanTaunt))
 
 ############ Rank Cards by how often they are picked
