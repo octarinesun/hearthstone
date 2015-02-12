@@ -56,7 +56,7 @@ hasAOEdmg<-lapply(stockCards.abbr$cardText,function(x)
   grepl("damage",x,ignore.case=T) & grepl("ALL",x,ignore.case=T))
 hasAOEdmg<-unlist(hasAOEdmg)
 
-## Affects all enemies
+## Silence enemies
 hasSilence<-lapply(stockCards.abbr$cardText,function(x) 
   grepl("silence",x,ignore.case=T))
 hasSilence<-unlist(hasSilence)
@@ -120,79 +120,106 @@ fullCardRecord<-fullCardRecord[!is.na(fullCardRecord$wins),]
 
 ########### Only deal with selected cards
 fullCardRecord.selects<-fullCardRecord[fullCardRecord$isSelected==1,]
-rm(fullCardRecord)
+#rm(fullCardRecord)
 ## for now, omit the records
 # fullCardRecord.selects<-left_join(fullCardRecord.selects,arenaRecords.abbr,by="arenaId")
 
-# winDependencies.byWins<-ddply(fullCardRecord.selects,"wins",summarise,
-#                        deckCost.median=median(cardCost),
-#                        deckCost.mean=mean(cardCost),
-#                        deckRarity=mean(cardRarity.x)
-#                        meanTaunt=mean(hasTaunt),
-#                        meanTaunt=mean(hasTaunt),
-#                        )
-# 
-# ggplot()+geom_point(data=winDependencies,aes(wins,deckRarity))
-# ggplot()+geom_point(data=winDependencies,aes(wins,deckCost.mean))
 
-winDependencies.byID<-ddply(fullCardRecord.selects,"arenaId",summarise,
-                            deckCost.median=median(cardCost),
-                            deckCost.mean=mean(cardCost),
-                            deckRarity=mean(cardRarity.x),
-                            tauntCount=sum(hasTaunt),
-                            drawCount=sum(hasDraw),
-                            destroyCount=sum(hasDestroy),
-                            aoeCount=sum(hasAOEdmg),
-                            silenceCount=sum(hasSilence)
-)
+# deprecated and replaced with dplyr
+# winDependencies.byID<-ddply(fullCardRecord.selects,"arenaId",summarise,
+#                             deckCost.median=median(cardCost),
+#                             deckCost.mean=mean(cardCost),
+#                             deckRarity=mean(cardRarity.x),
+#                             tauntCount=sum(hasTaunt),
+#                             drawCount=sum(hasDraw),
+#                             destroyCount=sum(hasDestroy),
+#                             aoeCount=sum(hasAOEdmg),
+#                             silenceCount=sum(hasSilence),
+#                             minionCount=sum(cardType=="Minion"),
+#                             spellCount=sum(cardType=="Spell")
+# )
 
-winDependencies.byWins<-ddply(winDependencies.byID,"wins",summarise,
-                              meanTaunt=mean(tauntCount),
-                              meanDraw=mean(drawCount),
-                              meanDestroy=mean(destroyCount),
-                              meanAOE=mean(aoeCount),
-                              meanSilence=mean(silenceCount)
-)
+
+winDependencies.byID<-fullCardRecord.selects %>%
+  group_by(arenaId) %>%
+  summarise(
+    deckCost.median=median(cardCost),
+    deckCost.mean=mean(cardCost),
+    deckRarity=mean(cardRarity.x),
+    tauntCount=sum(hasTaunt),
+    drawCount=sum(hasDraw),
+    destroyCount=sum(hasDestroy),
+    aoeCount=sum(hasAOEdmg),
+    silenceCount=sum(hasSilence),
+    minionCount=sum(cardType=="Minion"),
+    spellCount=sum(cardType=="Spell"),
+    uncategorized=sum(hasDraw==FALSE & hasDestroy==FALSE & hasAOEdmg==FALSE & hasSilence==FALSE)
+    )
 
 winDependencies.byID<-left_join(winDependencies.byID,arenaRecords.abbr,by="arenaId")
-winDependencies.byID$winRate<-winDependencies.byID$wins/(winDependencies.byID$wins+winDependencies.byID$losses)
 
-ggplot()+geom_point(data=winDependencies.byWins,aes(wins,meanTaunt))
+winDependencies.byWins<-winDependencies.byID %>%
+  group_by(wins) %>%
+  summarise(
+    deckCost=mean(deckCost.mean),
+    meanTaunt=mean(tauntCount),
+    meanDraw=mean(drawCount),
+    meanDestroy=mean(destroyCount),
+    meanAOE=mean(aoeCount),
+    meanSilence=mean(silenceCount),
+    meanSpell=mean(spellCount),
+    meanMinion=mean(minionCount),
+    meanUncat=mean(uncategorized)
+  )
+
+
+ggplot()+geom_line(data=winDependencies.byWins,aes(meanUncat,wins))
+
+ggplot(melt(winDependencies.byWins[,1:7],id.vars="wins"),aes(value,wins))+geom_line()+facet_wrap(~variable,ncol=2,scales="free")
 
 ############ Rank Cards by how often they are picked
 cardPool.abbr<-select(fullCardRecord,cardName,cardId,cardSet,cardType,cardClass,isSelected,wins)
 
-mostPicked<-ddply(cardPool.abbr,"cardId",summarise,
-                  name=unique(cardName),
-                  type=unique(cardType),
-                  class=unique(cardClass),
-                  timesPicked=sum(isSelected==1),
-                  timesSeen=length(cardId),
-                  percentPicked=timesPicked/timesSeen
-)
+mostPicked<-cardPool.abbr %>%
+  group_by(cardId) %>%
+  summarise(
+    name=unique(cardName),
+    type=unique(cardType),
+    class=unique(cardClass),
+    timesPicked=sum(isSelected==1),
+    timesSeen=length(cardId),
+    percentPicked=timesPicked/timesSeen
+    )
+
 mostPicked<-arrange(mostPicked[mostPicked$type=="Minion",],desc(percentPicked))
 
 #### ----- look at the top 10 winners and losers
-cardPool.winners<-cardPool.abbr[cardPool.abbr$wins %in% 10:12,]
-mostPicked.winners<-ddply(cardPool.winners,"cardId",summarise,
-                          name=unique(cardName),
-                          type=unique(cardType),
-                          class=unique(cardClass),
-                          timesPicked=sum(isSelected==1),
-                          timesSeen=length(cardId),
-                          percentPicked=timesPicked/timesSeen
-)
-mostPicked.winners.sort<-arrange(mostPicked.winners[mostPicked.winners$type=="Weapon",],desc(percentPicked))[1:10,]
+cardPool.winners<-cardPool.abbr[cardPool.abbr$wins>median(arenaRecords.abbr$wins,na.rm=T),]
 
-cardPool.losers<-cardPool.abbr[cardPool.abbr$wins %in% 0:3,]
-mostPicked.losers<-ddply(cardPool.losers,"cardId",summarise,
-                         name=unique(cardName),
-                         type=unique(cardType),
-                         class=unique(cardClass),
-                         timesPicked=sum(isSelected==1),
-                         timesSeen=length(cardId),
-                         percentPicked=timesPicked/timesSeen
-)
+mostPicked.winners<-cardPool.winners %>%
+  group_by(cardId) %>%
+  summarise(
+    name=unique(cardName),
+    type=unique(cardType),
+    class=unique(cardClass),
+    timesPicked=sum(isSelected==1),
+    timesSeen=length(cardId),
+    percentPicked=timesPicked/timesSeen
+    )
+
+mostPicked.winners.sort<-arrange(mostPicked.winners,desc(percentPicked))[1:10,]
+
+cardPool.losers<-cardPool.abbr[cardPool.abbr$wins<=median(arenaRecords.abbr$wins,na.rm=T),]
+mostPicked.losers<-cardPool.losers %>%
+  group_by(cardId) %>%
+  summarise(
+    name=unique(cardName),
+    type=unique(cardType),
+    class=unique(cardClass),
+    timesPicked=sum(isSelected==1),
+    timesSeen=length(cardId),
+    percentPicked=timesPicked/timesSeen
+  )
 mostPicked.losers.sort<-arrange(mostPicked.losers[mostPicked.losers$type=="Weapon",],desc(percentPicked))[1:10,]
 
 
