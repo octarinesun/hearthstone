@@ -158,6 +158,8 @@ winDependencies.byID<-fullCardRecord.selects %>%
     minionCount=sum(cardType=="Minion"),
     spellCount=sum(cardType=="Spell"),
     classCount=sum(cardClass!=0),
+    legendaryCount=sum(cardRarity.x==5),
+    epicCount=sum(cardRarity.x==4),
     uncategorized=sum(hasDraw==FALSE & hasDestroy==FALSE & hasAOEdmg==FALSE & hasSilence==FALSE)
   ) %>%
   left_join(arenaRecords.abbr,by="arenaId")
@@ -187,49 +189,24 @@ winDependencies.byID %>%
     meanClass=mean(classCount),
     meanSpell=mean(spellCount),
     meanMinion=mean(minionCount),
+    meanLegendary=mean(legendaryCount),
+    meanEpic=mean(epicCount),
     meanUncat=mean(uncategorized)
   ) %>%
   filter(!is.na(wins))
 }
-ggplot(melt(winDependencies.byClass(3)[,1:10],id.vars="wins"),aes(value,wins))+geom_point()+facet_wrap(~variable,ncol=3,scales="free")
+ggplot(melt(select(winDependencies.byClass(8),wins,meanLegendary,meanEpic),id.vars="wins"),aes(value,wins))+geom_point()+facet_wrap(~variable,ncol=1,scales="free")
 
 
-## warlock
-winDependencies.warlock<-winDependencies.byID %>%
-  filter(arenaClassId==8) %>%
-  group_by(wins) %>%
-  summarise(
-    deckCost=mean(deckCost.mean),
-    meanTaunt=mean(tauntCount),
-    meanDraw=mean(drawCount),
-    meanDestroy=mean(destroyCount),
-    meanAOE=mean(aoeCount),
-    meanSilence=mean(silenceCount),
-    meanClass=mean(classCount),
-    meanSpell=mean(spellCount),
-    meanMinion=mean(minionCount),
-    meanUncat=mean(uncategorized)
-  ) %>%
-  filter(!is.na(wins))
+## Histogram overview
+qplot(wins,data=filter(winDependencies.byID,!is.na(wins)),binwidth=1)+facet_wrap(~arenaClassId)
 
-winDependencies.mage<-winDependencies.byID %>%
-  filter(arenaClassId==3) %>%
-  group_by(wins) %>%
-  summarise(
-    deckCost=mean(deckCost.mean),
-    meanTaunt=mean(tauntCount),
-    meanDraw=mean(drawCount),
-    meanDestroy=mean(destroyCount),
-    meanAOE=mean(aoeCount),
-    meanSilence=mean(silenceCount),
-    meanClass=mean(classCount),
-    meanSpell=mean(spellCount),
-    meanMinion=mean(minionCount),
-    meanUncat=mean(uncategorized)
-  ) %>%
-  filter(!is.na(wins))
 
-ggplot()+geom_line(data=winDependencies.byClass(3),aes(meanClass,wins))+geom_line(data=winDependencies.warlock,aes(meanClass,wins))
+## warlock vs mage
+winDependencies.warlock<-winDependencies.byClass(8)
+winDependencies.mage<-winDependencies.byClass(3)
+
+ggplot()+geom_line(data=winDependencies.byClass(3),aes(meanAOE,wins))+geom_line(data=winDependencies.warlock,aes(meanAOE,wins))
 
 ### visualization of card attributes vs win and count in deck
 test<-melt(winDependencies.byID,id.vars="wins") %>%
