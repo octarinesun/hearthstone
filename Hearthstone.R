@@ -7,7 +7,7 @@ setwd("~/GitHub/NYCDSA/Personal Projects/Hearthstone")
 # unlist(AllSets)
 
 require(sqldf)
-require(plyr)
+#require(plyr)
 require(dplyr)
 require(RMySQL)
 require(ggplot2)
@@ -28,7 +28,7 @@ stockCards.abbr<-select(stockCards.full,cardId,cardName:cardClass,cardCost:cardT
 # Practice:
 # find the histogram of card costs
 
-hist(stockCards.abbr$cardCost)
+# hist(stockCards.abbr$cardCost)
 
 # Breakdown card types (minion,spell,weapon)
 stockCards.abbr$cardType<-factor(stockCards.abbr$cardType,levels=c(1,2,3),labels=c("Minion","Spell","Weapon"))
@@ -70,17 +70,18 @@ arenaDraftPool.full<-dbGetQuery(con, "SELECT * FROM arenaDraftRow")
 # completeDecks.arenaIDs<-with(arenaDraftPool.full, unique(arenaId[pickNum==30]))
 
 # There are this many complete decks in the data set
-numCompleteDecks<-length(completeDecks.arenaIDs)
+# numCompleteDecks<-length(completeDecks.arenaIDs)
 
 # There are this many total decks that were started at all
-numStartedDecks<-length(arenaDraftPool.full[arenaDraftPool.full$pickNum==1,1])
+# numStartedDecks<-length(arenaDraftPool.full[arenaDraftPool.full$pickNum==1,1])
 
 # Proportion
-numCompleteDecks/numStartedDecks
+# numCompleteDecks/numStartedDecks
 
 # Okay, so what about records and win-rates per arenaId (db = arenaArena)
 arenaRecords.full<-dbGetQuery(con, "SELECT * FROM arenaArena")
-arenaRecords.abbr<-select(arenaRecords.full,arenaId:arenaClassId,wins=arenaOfficialWins,losses=arenaOfficialLosses,retire=arenaRetireEarly)
+arenaRecords.abbr<-select(arenaRecords.full,arenaId:arenaClassId,wins=arenaOfficialWins,losses=arenaOfficialLosses,retire=arenaRetireEarly) %>%
+  filter(!is.na(wins),!is.na(losses))
 
 # Exploratory: what is the spread of arena wins
 head(arenaRecords.full)
@@ -88,14 +89,14 @@ hist(arenaRecords.abbr$wins)
 rm(arenaRecords.full)
 
 # what percentage of early retires
-sum(arenaRecords.abbr$retire)/nrow(arenaRecords.abbr)
+# sum(arenaRecords.abbr$retire)/nrow(arenaRecords.abbr)
 # [1] 0.006569347
 
 # Should early retires be removed? Essentially, they have given up, most likely because of poor performance
 # completeRecords<-intersect(completeDecks,arenaRecords.abbr$arenaId[arenaRecords.abbr$retire==0])
 
-nrow(arenaRecords.abbr[arenaRecords.abbr$arenaId %in% completeDecks.arenaIDs,])
-head(arenaRecords.abbr[arenaRecords.abbr$arenaId %in% completeDecks.arenaIDs,])
+# nrow(arenaRecords.abbr[arenaRecords.abbr$arenaId %in% completeDecks.arenaIDs,])
+# head(arenaRecords.abbr[arenaRecords.abbr$arenaId %in% completeDecks.arenaIDs,])
 
 
 arenaDraftCards.full<-dbGetQuery(con, "SELECT * FROM arenaDraftCards")
@@ -108,19 +109,22 @@ arenaDraftCards.full<-dbGetQuery(con, "SELECT * FROM arenaDraftCards")
 # save(fullCardRecord,file="fullCardRecord")
 # fullCardRecord<-load("fullCardRecord")
 
-fullCardRecord<-left_join(arenaDraftPool.full,arenaDraftCards.full,by="rowId")
-rm(arenaDraftCards.full)
-fullCardRecord<-left_join(fullCardRecord,stockCards.abbr,by="cardId")
+fullCardRecord.selects<-left_join(arenaDraftPool.full,arenaDraftCards.full,by="rowId")%>%
+  left_join(stockCards.abbr,by="cardId") %>%
+  select(-ends_with(".y"),-playerNote) %>%
+  rename(arenaId=arenaId.x, pickNum=pickNum.x) %>%
+  filter(isSelected==1) %>%
+  left_join(arenaRecords.abbr,by="arenaId")
 
 # Remove extraneous columns
-fullCardRecord<-select(fullCardRecord,-arenaId.y,-pickNum.y,-cardRarity.y,-playerNote)
-names(fullCardRecord)[3]<-"arenaId"
-fullCardRecord<-left_join(fullCardRecord,arenaRecords.abbr,by="arenaId")
-fullCardRecord<-fullCardRecord[!is.na(fullCardRecord$wins),]
+# fullCardRecord<-select(fullCardRecord,-arenaId.y,-pickNum.y,-cardRarity.y,-playerNote)
+# names(fullCardRecord)[3]<-"arenaId"
+# fullCardRecord<-left_join(fullCardRecord,arenaRecords.abbr,by="arenaId")
+# fullCardRecord<-fullCardRecord[!is.na(fullCardRecord$wins),]
 
 ########### Only deal with selected cards
-fullCardRecord.selects<-fullCardRecord[fullCardRecord$isSelected==1,]
-#rm(fullCardRecord)
+# fullCardRecord.selects<-fullCardRecord[fullCardRecord$isSelected==1,]
+# rm(fullCardRecord)
 ## for now, omit the records
 # fullCardRecord.selects<-left_join(fullCardRecord.selects,arenaRecords.abbr,by="arenaId")
 
@@ -153,12 +157,25 @@ winDependencies.byID<-fullCardRecord.selects %>%
     silenceCount=sum(hasSilence),
     minionCount=sum(cardType=="Minion"),
     spellCount=sum(cardType=="Spell"),
+    classCount=sum(cardClass!=0),
     uncategorized=sum(hasDraw==FALSE & hasDestroy==FALSE & hasAOEdmg==FALSE & hasSilence==FALSE)
-    )
+  ) %>%
+  left_join(arenaRecords.abbr,by="arenaId")
 
-winDependencies.byID<-left_join(winDependencies.byID,arenaRecords.abbr,by="arenaId")
+table<-select(winDependencies.byID,wins,tauntCount)
+t2<-table(table$wins,table$tauntCount)
+heatmap(t2,Rowv=NA,Colv=NA,col=heat.colors(256),scale="column")
 
-winDependencies.byWins<-winDependencies.byID %>%
+ggplot(winDependencies.byID,aes(x=aoeCount,y=wins))+geom_tile(aes(fill=wins))
+  
+qplot(as.factor(wins),x=drawCount,y=wins,position="jitter",data=winDependencies.byID,alpha=0.0001,xlim=c(0,10))
+qplot(as.factor(wins),aoeCount,data=winDependencies.byID[!is.na(winDependencies.byID$wins),],geom="boxplot")+coord_flip()
+qplot(y=wins,x=aoeCount,color=nrow(wins),data=winDependencies.byID[!is.na(winDependencies.byID$wins),],
+      position="jitter",alpha=1,xlim=c(0,8))
+
+winDependencies.byClass=function(classID=c(1:9)){
+winDependencies.byID %>%
+  filter(arenaClassId %in% classID) %>%
   group_by(wins) %>%
   summarise(
     deckCost=mean(deckCost.mean),
@@ -167,15 +184,60 @@ winDependencies.byWins<-winDependencies.byID %>%
     meanDestroy=mean(destroyCount),
     meanAOE=mean(aoeCount),
     meanSilence=mean(silenceCount),
+    meanClass=mean(classCount),
     meanSpell=mean(spellCount),
     meanMinion=mean(minionCount),
     meanUncat=mean(uncategorized)
-  )
+  ) %>%
+  filter(!is.na(wins))
+}
+ggplot(melt(winDependencies.byClass(3)[,1:10],id.vars="wins"),aes(value,wins))+geom_point()+facet_wrap(~variable,ncol=3,scales="free")
 
 
-ggplot()+geom_line(data=winDependencies.byWins,aes(meanUncat,wins))
+## warlock
+winDependencies.warlock<-winDependencies.byID %>%
+  filter(arenaClassId==8) %>%
+  group_by(wins) %>%
+  summarise(
+    deckCost=mean(deckCost.mean),
+    meanTaunt=mean(tauntCount),
+    meanDraw=mean(drawCount),
+    meanDestroy=mean(destroyCount),
+    meanAOE=mean(aoeCount),
+    meanSilence=mean(silenceCount),
+    meanClass=mean(classCount),
+    meanSpell=mean(spellCount),
+    meanMinion=mean(minionCount),
+    meanUncat=mean(uncategorized)
+  ) %>%
+  filter(!is.na(wins))
 
-ggplot(melt(winDependencies.byWins[,1:7],id.vars="wins"),aes(value,wins))+geom_line()+facet_wrap(~variable,ncol=2,scales="free")
+winDependencies.mage<-winDependencies.byID %>%
+  filter(arenaClassId==3) %>%
+  group_by(wins) %>%
+  summarise(
+    deckCost=mean(deckCost.mean),
+    meanTaunt=mean(tauntCount),
+    meanDraw=mean(drawCount),
+    meanDestroy=mean(destroyCount),
+    meanAOE=mean(aoeCount),
+    meanSilence=mean(silenceCount),
+    meanClass=mean(classCount),
+    meanSpell=mean(spellCount),
+    meanMinion=mean(minionCount),
+    meanUncat=mean(uncategorized)
+  ) %>%
+  filter(!is.na(wins))
+
+ggplot()+geom_line(data=winDependencies.byClass(3),aes(meanClass,wins))+geom_line(data=winDependencies.warlock,aes(meanClass,wins))
+
+### visualization of card attributes vs win and count in deck
+test<-melt(winDependencies.byID,id.vars="wins") %>%
+  filter(variable=="drawCount") %>%
+  group_by(value) %>%
+  summarise()
+
+qplot(data=test,x=value, y=wins,position="jitter", alpha=0.1)
 
 ############ Rank Cards by how often they are picked
 cardPool.abbr<-select(fullCardRecord,cardName,cardId,cardSet,cardType,cardClass,isSelected,wins)
@@ -189,7 +251,7 @@ mostPicked<-cardPool.abbr %>%
     timesPicked=sum(isSelected==1),
     timesSeen=length(cardId),
     percentPicked=timesPicked/timesSeen
-    )
+  )
 
 mostPicked<-arrange(mostPicked[mostPicked$type=="Minion",],desc(percentPicked))
 
@@ -205,7 +267,7 @@ mostPicked.winners<-cardPool.winners %>%
     timesPicked=sum(isSelected==1),
     timesSeen=length(cardId),
     percentPicked=timesPicked/timesSeen
-    )
+  )
 
 mostPicked.winners.sort<-arrange(mostPicked.winners,desc(percentPicked))[1:10,]
 
@@ -287,6 +349,15 @@ testDeck.1468<-merge(testCards,stockCards.abbr,by=intersect(names(testCards),nam
 mean(testDeck.1468$cardRarity)
 sum(testDeck.1468$cardClass!=0)
 
+library(gbm)
+hs.mod<-gbm(!is.na(wins.x) ~ as.factor(cardId),
+            distribution="multinomial",
+            data=fullCardRecord.selects,
+            n.trees=3000,
+            shrinkage=0.001,
+            cv.folds=5,
+            verbose=F,
+            n.cores=2)
 
 # some weird gbm stuff????
 y<-c(1:5,1:5)
