@@ -1,0 +1,510 @@
+---
+title: "Modeling Hearthstone Decks to Predict Success"
+author: "Alex Adler"
+date: "April 1, 2015"
+output: html_document
+---
+
+## Goals:
+- Primary: Use the player-reported *Hearthstone: Heroes of Warcraft* Arena deck composition to predict deck success.
+- Secondary: Help players make data-driven decisions while selecting their decks
+
+## About the Game:
+*Hearthstone* is turn-based electronic card game where players assume the role of one of nine heroes including a mage, a rogue, and a warrior. Each hero competes using 30-card decks of creatures (minions), spells, and weapons to reduce their opponent's health points to zero. These decks may contain any combination of cards from a pool of common cards and cards that only that hero may weild. For instance, mages have access to *Fireball*, but not to *Fiery War Axe*--a warrior card--whereas both have access to the *Abomination*. This study focuses on Arena Mode, where players craft their decks by drafting one card at a time, making this choice among three random cards each round. Since players do not know which cards may appear in later rounds, they must choose these cards based on their perceived value among the cards shown or based on any synergy among the cards they have already selected.
+
+## The Data Source:
+There are no built-in quantitative datasets available to the player by way of a profile or ranking list. Dedicated players can record and track their progress in these arena matches on websites such as [Arena Mastery](http://www.arenamastery.com). A player may keep track of which cards they had in their deck, how many wins/losses they ended their run with, and even which heroes they lost to. Because *Blizzard Entertainment,* the game's creator, has not released an API for this game, these websites are the best way for outsiders to acquire quantitative information on gameplay. The webmaster and developer of [Arena Mastery](http://www.arenamastery.com) made available a de-personalized portion of this data for use in this project. This subset includes data from the game's release until late November, 2014, over 90,000 completed decks by over 9,000 unique players in total. It is because of his hard work and the self-reporting of scores and decks from players around the world that this work was made possible.
+
+The data set contains several SQL tables that track player performance. The tables accessed in this study are described below:
+
+- `arenaCards`: All Hearthstone cards (with names, id, description and other stats)
+
+- `arenaArena`: All arena results (summary of wins/losses)
+
+- `arenaDraftRow`: Records of arena "picks" but not the individual cards
+
+- `arenaDraftCards`: The cards associated with the picks tracked in arenaDraftRow
+
+- `statEras`: Events that mark different periods to track updates/expansions/changes to the game
+
+- `arenaClass`: All 9 Hearthstone classes
+
+The `RMySQL` library was essential to reading these data and allowed the selection of only variables of interest to be loaded, saving memory.
+
+```{r, echo=FALSE, message=FALSE, results='hide'}
+require(ggplot2)
+require(lubridate)
+require(e1071)
+require(leaps)
+require(caret)
+require(corrplot)
+require(RMySQL)
+require(dplyr)
+require(knitr)
+
+# Setup access to the SQL localhost on MAMP
+db <- src_mysql(dbname = 'AMDB', host = 'localhost', user="root", password="root",unix.sock="/Applications/MAMP/tmp/mysql/mysql.sock")
+drv <- dbDriver("MySQL")
+con <- dbConnect(drv, host = 'localhost', user="root", password="root", dbname = 'AMDB',unix.sock="/Applications/MAMP/tmp/mysql/mysql.sock")
+dbListTables(con)
+```
+
+## Data Tidying
+The data were generally pretty clean. Most of what was done in this section was done by merges, joins and filters through the `dplyr` package.
+
+### Load and clean the `cardPool` data, i.e. details about the cards that could be chosen
+```{r, echo=FALSE,results='hide',cache=TRUE}
+# Read the arena card SQL table
+cardPool<-dbGetQuery(con, "SELECT cardId, cardName, cardSet, cardRarity, 
+                     cardType, cardClass, cardCost, cardText FROM arenaCards")
+
+# Relabel the card types from 1,2,3 to Minion, Spell or Weapon
+cardPool$cardType<-factor(cardPool$cardType,levels=c(1,2,3),
+                          labels=c("Minion","Spell","Weapon"))
+
+# Relabel the card rarities (two lines because of "common" factor cleanup)
+cardPool$cardRarity<-as.factor(cardPool$cardRarity)
+levels(cardPool$cardRarity)<-c("Common","Common","Rare","Epic","Legendary")
+
+# Relabel card class
+cardPool$cardClass<-factor(cardPool$cardClass,levels=c(0:9),c("Neutral","Druid","Hunter","Mage","Paladin","Priest","Rogue","Shaman","Warlock","Warrior"))
+
+# Filter out cards unavailable during Arena Drafts (promotional or quest reward cards)
+cardPool<-filter(cardPool,!(cardSet %in% c(10,11)))
+```
+
+Here, the primary variables I was concerned with were:
+
+- `cardId`: A unique numeric card identifier
+
+- `cardName`: Name of the card
+
+- `cardSet`: The set to which the card belongs (i.e. original release or expansion)
+
+- `cardRarity`: A factor determining the level of rarity of the card (common, rare, epic, or legendary)
+
+- `cardType`: Is the card a minion/creature, a spell, or a weapon
+
+- `cardClass`: Which class can use the card (0 is common to all classes)
+
+- `cardCost`: The card's mana cost
+
+- `cardText`: Any additional text that described other card attributes.
+
+For example, the *Abomination* card appears like this to a player:
+
+<img src="http://media-hearth.cursecdn.com/avatars/37/941/597.png" />
+
+And has a corresponding entry in `cardPool` that looks like this:
+```{r, echo=FALSE}
+kable(filter(cardPool,cardName=="Abomination"),format="markdown",padding=5, align='l')
+```
+
+Later, the `cardText` was parsed in order to pick out special features like "Taunt" or "Damage."
+```{r, echo=FALSE,results='hide'}
+## Exploratory: What's the breakdown of card types
+summary(cardPool$cardClass) # card class breakdown
+summary(cardPool$cardRarity) # card rarity breakdown
+prop.table(table(cardPool$cardRarity)) # card rarity proportion
+summary(cardPool$cardType) # card type summary
+prop.table(table(cardPool$cardType)) # card type proportions
+```
+
+### Merge arena results and deck selection records.
+With the card pool in place, the next step was to load the arena records themselves. The variables of interest are as follows:
+
+- `arenaId`: A unique identifier for the arena run
+
+- `arenaPlayerId`: A unique player ID (account number)
+
+- `arenaClassId`: The ID of the class being played during the arena run
+
+- `arenaOfficialWins`: Number of wins
+
+- `arenaOfficialLosses`: Number of losses
+
+- `arenaWins`: Number of wins (not including "disconnects")
+
+- `arenaLosses`: Number of losses (not including "disconnects")
+
+- `arenaRetireEarly`: Did the player end the run early
+
+- `arenaStartDate`: When was the arena deck selected, starting that run
+
+```{r, cache=T,echo=F,cache=TRUE}
+unixEpoch<-ymd("1970-01-01")
+# Load in arena eras to automatically select dates of interest
+arenaEras<-dbGetQuery(con,"SELECT * FROM statEras")
+# Convert Arena Eras to UTC date/times
+arenaEras$eraStart<-unixEpoch+seconds(arenaEras$eraStart)
+arenaEras$eraEnd<-unixEpoch+seconds(arenaEras$eraEnd)
+
+arenaRecords<-dbGetQuery(con, "SELECT arenaId, arenaPlayerId, arenaClassId, arenaOfficialWins \"officialWins\",
+                              arenaOfficialLosses \"officialLosses\", arenaWins \"wins\", arenaLosses \"losses\",
+                              arenaRetireEarly \"retire\", arenaStartDate
+                              FROM arenaArena") %>%
+  filter(!is.na(wins),!is.na(losses),retire==0) # remove retires and NA wins/losses
+
+# A list of classes and their corresponding labels
+classes<-dbGetQuery(con, "SELECT * FROM arenaClass")
+arenaRecords$arenaClassId<-factor(arenaRecords$arenaClassId,c(1:9),classes[,2])
+# Convert Arena Records to UTC date/times
+arenaRecords$arenaStartDate<-unixEpoch+seconds(arenaRecords$arenaStartDate)
+
+# Only take arena entries starting at official release
+release.official<-arenaEras[13,4]
+release.naxx<-arenaEras[20,4]-days(9) # account for early availability of naxx cards
+endofdata<-max(arenaRecords$arenaStartDate)
+
+arenaRecords<-filter(arenaRecords,arenaStartDate>=release.official) %>%
+  select(-retire)
+
+# Example head of arenaRecords Dataframe for display
+kable(x=select(head(arenaRecords,n=5),-officialWins,-officialLosses),format="markdown",longtable = TRUE,padding=5,align='l')
+```
+
+#### Official vs. Reported wins/losses
+Here, I made the choice to only look at reported ("unofficial") wins and losses, rather than official outcomes. Players have the option to flag a win or a loss as if the game ended in either opponent disconnecting early. For example, if a player's connection to the server fails and causes a game loss, that player may choose to report the loss, or evaluate his/her standing at the time of disconnect and flag the game as a "win." Out of `r nrow(arenaRecords)` arena games, games flagged in this way account for an over-reporting of wins by `r round(100*with(arenaRecords, sum(officialWins-wins,na.rm=T)/sum(officialWins,na.rm=T)),2)`% and an under-reporting of losses by `r round(100*with(arenaRecords, sum(officialLosses-losses,na.rm=T)/sum(officialLosses,na.rm=T)),2)`%.
+
+```{r cache=TRUE,echo=FALSE,cache=TRUE}
+arenaDraftCards<-dbGetQuery(con, "SELECT draftId, cardId, arenaId, rowId, isSelected FROM arenaDraftCards")
+
+arenaDraftPool<-dbGetQuery(con, "SELECT rowId, arenaId, pickNum FROM arenaDraftRow")
+
+# First establish a way to query the full card record by era
+# (defaulting to post-release and pre-Naxxramas expansion)
+fullCardRecord=function(eraStart=release.official,eraEnd=release.naxx,selectsOnly=T){
+  # arenaId was incomplete for arenaDraftPool, so 'rowId' was used instead
+  cardRecord<-left_join(arenaDraftPool,arenaDraftCards,by="rowId")%>%
+    select(-ends_with(".y")) %>%
+    rename(arenaId=arenaId.x) %>%
+    left_join(arenaRecords,by="arenaId") %>%
+    filter(arenaStartDate>=eraStart, arenaStartDate<eraEnd) %>%
+    filter(arenaId %in% arenaId[which(pickNum==30)]) %>% # Only consider complete decks
+    select(-pickNum, -rowId,-officialWins,-officialLosses) # remove unnecessary columns
+  
+  if(selectsOnly){cardRecord<-filter(cardRecord,isSelected==1)}
+
+# Rename levels
+levels(cardRecord$arenaClassId)<-c("Druid","Hunter","Mage","Paladin","Priest","Rogue","Shaman","Warlock","Warrior")
+
+return(cardRecord)
+}
+
+# store useful era records in R objects
+# NA's removed (games in progress)
+allTime<-filter(fullCardRecord(eraEnd=endofdata,selectsOnly=F),!is.na(draftId))
+vanilla<-filter(fullCardRecord(selectsOnly=F),!is.na(draftId))
+naxx<-filter(fullCardRecord(eraStart=release.naxx,selectsOnly=F),!is.na(draftId))
+```
+
+The final stage was to join arena records and card choices. Here is where most of the data were discarded. It turns out that only `r round(100*nrow(filter(arenaDraftPool,pickNum==30,arenaId %in% unique(arenaRecords$arenaId)))/length(unique(arenaRecords$arenaId)),3)
+`% of games had full decks associated with them. This small subset was not randomly selected and a students' t-test indicates that those who recorded their decks had a mean win rate that was lower than those who did not, by about 0.5 at 95% confidence.
+
+```{r,echo=FALSE,results='hide', cache=TRUE}
+arenaID.rec<-unique(fullCardRecord(eraEnd=endofdata)$arenaId)
+wins.rec<-filter(arenaRecords,arenaId %in% arenaID.rec)$wins
+wins.notrec<-filter(arenaRecords,!(arenaId %in% arenaID.rec))$wins
+
+win.ttest<-t.test(wins.rec,wins.notrec, var.equal=FALSE, paired=FALSE)
+mean(win.ttest$conf.int)
+```
+### Data Tidying Summary
+To sum up, deck lists associated with the win rates of over 90,000 games have been cleaned, merged, and subsetted. The next steps were to determine which features 
+
+##Feature Generation
+The data were rich with information about each card, however there were some other features that might be useful in predicting the success of a deck. For example, some players value cards that allow them to draw more cards when played. Some might value minions that "taunt" other minions, thereby protecting their life points. Furthermore, the original data set had information about which cards were selected and which were seen in a given draft round. From this information, I can learn the popularity of a card among the community of players reporting the data and get some measure as to the strength (or perceived strength) of that card.
+
+
+### Detailed Card/Deck Attributes (Parsing Card Text)
+Since some of the most powerful aspects of a card are written in the card text. This text was parsed for certain functions and those were stored as a boolean variable.
+```{r, warning=FALSE,echo=FALSE}
+# Code in Card Attributes
+hasTaunt<-unlist(lapply(cardPool$cardText,function(x) grepl("Taunt",x,ignore.case=T) & !grepl("destroy",x,ignore.case=T)))
+hasDraw<-unlist(lapply(cardPool$cardText,function(x) grepl("Draw",x,ignore.case=T)))
+hasDestroy<-unlist(lapply(cardPool$cardText,function(x) (grepl("Destroy",x,ignore.case=T) & grepl("minion",x,ignore.case=T))))
+hasAOEdmg<-unlist(lapply(cardPool$cardText,function(x) grepl("damage",x,ignore.case=T) & grepl("ALL",x,ignore.case=F)))
+hasSilence<-unlist(lapply(cardPool$cardText,function(x) grepl("silence",x,ignore.case=T)))
+hasCharge<-unlist(lapply(cardPool$cardText,function(x) grepl("charge",x,ignore.case=T)))
+hasHeal<-unlist(lapply(cardPool$cardText,function(x) grepl("restore",x,ignore.case=T)))
+hasDeathrattle<-unlist(lapply(cardPool$cardText,function(x) grepl("Deathrattle:",x,ignore.case=T)))
+hasEnrage<-unlist(lapply(cardPool$cardText,function(x) grepl("Enrage",x,ignore.case=T)))
+hasDamage<-unlist(lapply(cardPool$cardText,function(x) grepl("Deal",x,ignore.case=T)))
+hasBattlecry<-unlist(lapply(cardPool$cardText,function(x) grepl("Battlecry:",x,ignore.case=T)))
+hasFreeze<-unlist(lapply(cardPool$cardText,function(x) grepl("Freeze",x,ignore.case=T)))
+hasShield<-unlist(lapply(cardPool$cardText,function(x) grepl("Divine Shield",x,ignore.case=T) & !grepl("lose",x,ignore.case=T)))
+hasBuff<-unlist(lapply(cardPool$cardText,function(x) grepl("\\+[0-9]",x,ignore.case=T)))
+isBlank<-unlist(lapply(cardPool$cardText,function(x) grepl("undefined",x,ignore.case=T)))
+
+# bind these columns in a data frame
+card.attr<-data.frame(hasTaunt,
+                hasDraw,
+                hasDestroy,
+                hasAOEdmg,
+                hasSilence,
+                hasCharge,
+                hasHeal,
+                hasDeathrattle,
+                hasEnrage,
+                hasDamage,
+                hasBattlecry,
+                hasFreeze,
+                hasShield,
+                hasBuff,
+                isBlank)
+```
+
+For example, the *Abomination* would show the following relevant `TRUE` flags (the `FALSE` flags have been omitted for brevity):
+```{r echo=FALSE}
+abomShow<-select(filter(cbind(cardPool,card.attr), cardName=="Abomination"),cardName, hasTaunt, hasDeathrattle, hasDamage,hasAOEdmg)
+
+kable(abomShow, format="markdown",padding=5, align='l')
+```
+
+The complete list of card abilities was added to the provided list of card attributes so that the more detailed characteristics (beyond card cost, card class, etc) of each deck could be summarized later.
+
+### Determine Card Popularity Ranks
+Since every player is shown a random set of cards , it is difficult to separate those who make poor selections from those who have bad luck, i.e. those who *do not* pick the best cards vs. those who *cannot.* In the data set, cards are recorded whether they are selected (`isSelected==1`) or not (`isSelected==0`); so, an objective measure of card popularity would be to normalize a card's selection by how often it appeared as an option.
+
+For example, the top 10 cards selected by Mages (among all deck win rates, 0-12) are:
+```{r }
+mostPickedCards=function(whichClass,winrate=c(0:12)){
+  cardPoolSpec<-select(filter(vanilla,arenaClassId==whichClass),cardId,arenaClassId,isSelected,wins)
+  
+  popularity<-cardPoolSpec %>%
+    filter(wins %in% winrate,                 # only the win rate of interest
+           arenaClassId %in% whichClass) %>%  # only the hero class of interest 
+    group_by(arenaClassId,cardId) %>%
+    summarise(
+      timesPicked=sum(isSelected==1),
+      timesSeen=length(cardId),
+      fractionPicked=sum(isSelected==1)/length(cardId)
+    ) %>%
+    ungroup 
+  
+  return(data.frame(popularity,rank=rank(desc(popularity$fractionPicked),ties.method="first")))
+}
+
+mageTop10<-arrange(left_join(mostPickedCards(whichClass="Mage"),select(cardPool,cardName,cardId),by="cardId"),rank)[1:10,]
+
+kable(select(mageTop10, rank, cardName, round(fractionPicked,2)),format="markdown",padding=5, align='l')
+```
+
+These ranks, when averaged among 30-card dekcs, would give some clue as to how many popular cards made it into the deck in question. More popular cards might indicate access to or selection of cards that the population as a whole agreed were "good." Furthermore, each individual card's rank was used to weight the card attributes when summarizing the decks. For example, not all cards with the taunt attribute are created equally. This ensured that a deck with 2 popular taunt cards would receive a different score than a deck with two unpopular taunt cards.
+
+### Feature Generation Summary
+With these features created, each deck was summarized, resulting in the following predictors were present:
+
+| Predictor Name | Description                                 |
+|----------------|---------------------------------------------|
+| `cost.mean`    | mean deck mana cost                         |
+| `cost.median`  | median deck mana cost                       |
+| `skew`         | skew of the mana curve                      |
+| `taunt`        | score of cards with taunt, weighted by card popularity                      | 
+| `draw`         | score of cards with draw, weighted by card popularity                       |
+| `destroy`      | score of cards with destroy, weighted by card popularity                    |
+| `aoe`          | score of cards with damage all, weighted by card popularity                 |
+| `silence`      | score of cards with silence, weighted by card popularity                    |
+| `charge`       | score of cards with charge, weighted by card popularity                     |
+| `heal`         | score of cards with heal, weighted by card popularity                       |
+| `rattle`       | score of cards with deathrattle, weighted by card popularity                |
+| `enrage`       | score of cards with enrage, weighted by card popularity                     |
+| `damage`       | score of cards that deal damage, weighted by card popularity                |
+| `buff`         | score of cards with buffs, weighted by card popularity                      |
+| `battlecry`    | score of cards with battlecry, weighted by card popularity                  |
+| `blank`        | score of cards with no special abilities, weighted by card popularity       |
+| `dmgSpell`     | score of spell cards with damage, weighted by card popularity               |
+| `minions`      | score of minion cards, weighted by card popularity                          |
+| `spells`       | score of spell cards, weighted by card popularity                           |
+| `classCard`    | score of cards available only to that class, weighted by card popularity    |
+| `avgRank`      | average popularity of the cards in the deck |
+| `top15`        | total cards in the top 15 most popular      |
+|----------------|---------------------------------------------|
+
+The header of the numeric dataframe of predictors is sampled below:
+
+```{r, echo=FALSE}
+magesPewPew<-filter(allTime,arenaClassId=="Mage",arenaStartDate<=release.naxx)
+cardPoolRich<-left_join(data.frame(cardPool,card.attr),select(mostPickedCards("Mage",winrate=c(0:12)),cardId,rank),by="cardId")
+cardPoolRich$rank<-ifelse(is.na(cardPoolRich$rank), max(cardPoolRich$rank,na.rm=T)+1,cardPoolRich$rank)
+medWins<-median(magesPewPew$wins)
+mageSet<-magesPewPew %>%
+  left_join(cardPoolRich,by="cardId") %>%
+  group_by(arenaId) %>%
+  summarise(
+    #    player=first(arenaPlayerId),
+    winCount=first(wins),
+    cost.mean=mean(cardCost),
+    cost.median=median(cardCost),
+    skew=skewness(cardCost),
+    taunt=sum(hasTaunt*rank),
+    draw=sum(hasDraw*rank),
+    destroy=sum(hasDestroy*rank),
+    aoe=sum(hasAOEdmg*rank),
+    silence=sum(hasSilence*rank),
+    charge=sum(hasCharge*rank),
+    heal=sum(hasHeal*rank),
+    rattle=sum(hasDeathrattle*rank),
+    enrage=sum(hasEnrage*rank),
+    damage=sum(hasDamage*rank),
+    buff=sum(hasBuff*rank),
+    battlecry=sum(hasBattlecry*rank),
+    blank=sum(isBlank*rank),
+    dmgSpell=sum((hasDamage & cardType=="Spell")*rank),
+    minions=sum((cardType=="Minion")*rank),
+    spells=sum((cardType=="Spell")*rank),
+    classCard=sum((cardClass!="Neutral")*rank),
+    avgRank=mean(rank),
+    top15=sum(rank<=15)
+  ) %>%
+  select(-arenaId)
+
+head(mageSet)
+```
+
+## Feature Selection
+Each hero class plays with a different style, so I chose to model the classes separately. Furthermore, gameplay was potentially changed with the release of the expansion. Here, I use the Mage data as a test case for the original release of the game. This subset resulted in a selection of approximately 11,000 games. 
+
+#### Overview of Features: Correlation Plots
+First, I looked at a correlation plot of the features in question, providing some hint of colineariaty among features. 
+
+```{r}
+require(corrplot)
+corrplot(cor(mageSet),method="ellipse",order="hclust",type="upper")
+```
+
+Clearly, there is a high degree of colinearity. For some features, high correlation was expected. For example, `dmgSpell` cards are a subset of `damage` cards and are correlated as a result. Furthermore, cards with `buff` tend to cost less mana, explaining the negative correlation between `buff` and `cost.mean`.
+
+```{r echo=FALSE}
+ggplot(filter(cardPoolRich,hasBuff==T,cardClass %in% c("Mage","Neutral")))+
+  geom_histogram(aes(x=cardCost,stat="identity"),fill="dark green",binwidth=1)+
+  theme_bw()+
+  xlab("Mana Cost")+
+  ylab("Number of Cards with Buff")+
+  ggtitle("Cards with buff have low mana cost")+
+  scale_x_continuous(breaks=0:9)+
+  scale_y_continuous(breaks=seq(0,12,2))
+```
+
+However, there is little correlation between any of the predictors and the `winCount` of the decks.
+
+#### Overview of Features: Heatmaps & Clustering
+Next, I wished to see how the features clustered among one another. Since the data were all greater than zero and had varying scales (i.e. `winCount` ranged from 0--12 whereas `avgRank` ranged from 27--175), the data had to first be centered and scaled. A heatmap of a stratified 20% of the data provided a visual confirmation that there were some clear clusters:
+
+```{r,cache=TRUE}
+set.seed(1337)
+mageSet.pp <- scale(mageSet, center=T, scale=T)
+hmStrat<-createDataPartition(y=as.factor(mageSet$winCount),p=0.8,list=F)
+heatmap(x=mageSet.pp[-hmStrat,-1]) # heatmap of all predictors
+```
+
+From this plot, some clustering by similar values is evident. For example, mean and median deck mana cost are fairly segregated among clusters, and form two somewhat distinct regions of predictor values.
+
+```{r, eval=FALSE,echo=FALSE}
+### Exploratory: Regression subsetting to select variables
+mageSet.regsubs<-regsubsets(x=winCount ~. , data=mageSet,nvmax=20)
+diagnostic <- data.frame(
+  est = c(summary(mageSet.regsubs)$cp,summary(mageSet.regsubs)$bic,summary(mageSet.regsubs)$adjr2),
+  x = rep(1:20, 3),
+  type = rep(c("cp", "BIC","Adj_r2"), each = 20)
+)
+
+ggplot(data=diagnostic)+geom_line(aes(x=x, y=est,color=type))+theme_bw()+
+  facet_grid(type ~ ., scales = "free_y")+
+  theme(legend.position="none")
+
+coef(mageSet.regsubs,5)
+
+mageSet.step <- mageSet
+null=lm(winCount~1, data=mageSet.step)
+full=lm(winCount~., data=mageSet.step)
+mage.step <- step(null, scope=list(upper=full), data=mageSet.step, direction="both")
+```
+
+I was less interested in predicting whether a deck would score 9 wins versus 10 and more interested in whether it was "superior" or "inferior". However, further information was needed to decide how to optimally split this category.
+
+## Predicting Win Count: Gradient Boosting Machines
+```{r}
+df<- mageSet %>%
+  mutate(topHalf=as.factor(ifelse(winCount>mean(winCount),"Superior","Inferior"))) %>%
+  select(-winCount)
+
+labelName<-"topHalf"
+predictors<-names(df)[!(names(df) %in% labelName)]
+set.seed(1337)
+labelNum<-which(names(df)==labelName)
+inTrain<-createDataPartition(y=df$topHalf,p=0.75,list=F)
+training<-df[inTrain,]
+test<-df[-inTrain,]
+
+# Check near-zero variance
+nearZeroVar(training[,predictors],saveMetrics=T)
+
+trControl <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs=T)
+
+model.rf<-train(topHalf~., data=training, method="rf", preProcess=c("center"), trControl=trControl)
+importance <- varImp(model.rf, scale=FALSE)
+plot(importance)
+
+# rf variable importance
+# 
+#             Overall
+# skew         640.10
+# cost.mean    578.70
+# battlecry    448.47
+# buff         443.34
+# top15        402.52
+# taunt        397.38
+# dmgSpell     394.67
+# draw         366.13
+# blank        358.93
+# rattle       340.63
+# charge       330.31
+# enrage       290.43
+# heal         282.52
+# destroy      257.49
+# silence      216.95
+# aoe          179.41
+# cost.median   61.45
+
+rfControl <- rfeControl(functions=rfFuncs, method="cv", number=10)
+results <- rfe(topHalf~., data=training, sizes=c(1:17), rfeControl=rfControl)
+
+# GBM
+# gbmGrid <-  expand.grid(interaction.depth = c(1, 3, 5),
+#                         n.trees = (1:10)*100,
+#                         shrinkage = c(0.01,0.1))
+
+# 100 trees, interaction depth of 1, shrinkage of 0.1
+
+mage.gbm<-train(topHalf~.,
+                data=training,
+                method='gbm',
+                trControl=trControl,
+                preProc = c("center","scale"))
+
+predictions<-predict(mage.gbm,test[,predictors])
+confusionMatrix(predictions,test$topHalf)
+
+# GBM PCA
+mage.gbmpca<-train(topHalf~.,
+                data=training,
+                method='gbm',
+                trControl=trControl,
+                preProc = "pca")
+
+predictions<-predict(mage.gbmpca,test[,predictors])
+confusionMatrix(predictions,test$topHalf)
+
+
+## RF
+mage.rf<-train(topHalf~.,
+                data=training,
+                method='rf',
+                trControl=trControl,
+                preProc = c("center","scale"))
+
+predictions<-predict(mage.rf,test[,predictors])
+confusionMatrix(predictions,test$topHalf)
+```
+

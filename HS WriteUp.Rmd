@@ -1,0 +1,571 @@
+---
+title: "Hearthstone Arena Survey"
+author: "Alex Adler"
+date: "March 23, 2015"
+output: pdf_document
+---
+
+# Motivation
+This study looks at self-reported data about the electronic card game, *Hearthstone: Heroes of World of Warcraft* (*Hearthstone*, for short). A game marketed towards casual gamers for its relatively simple gameplay, *Hearthstone* has sparked a competitive following as well and is even played professionally via webcasts and tournaments. A new player seeking to become better at the game might read guides or watch videos by professional players in order to mimic their play. This study seeks to leverage a more data-driven angle to help players select optimal decks for the Arena gameplay mode. Here, I propose two forms of deck selection/recommendation that inform the user about other players' choices in a highly visual way.
+
+# Background
+In order to understand some of this study, it is important to understand at least the basic gameplay. *Hearthstone* is turn-based electronic card game where players assume the role of one of nine heroes including a mage, a rogue, and a warrior, among others. Each hero competes using 30-card decks of creatures (minions), spells, and weapons to reduce their opponent's health points to zero. These decks may contain any combination of cards from a pool of common cards and cards that only that hero may weild. For instance, mages have access to *Fireball*, but not to *Fiery War Axe*--a warrior card--whereas both have access to the *Harvest Golem*. This study focuses on Arena Mode, where players craft their decks by drafting one card at a time, making this choice among three random cards each round. Since players do not know which cards may appear in later rounds, they must choose these cards based on their perceived value among the cards shown or based on any synergy among the cards they have already selected.
+
+## Basic Gameplay
+To understand some of the terminology in this report, it will help to review gameplay at a basic level. Players start with seven cards in their hand. Each turn, players start by drawing a card from their deck, randomly. These cards are played at the expense of a resource called "mana crystals." At the start of the next turn, a player's number of mana crystals replenishes and increases by one point until maxing out at ten. For instance, on turn 5, a player may play a card that costs 5 mana crystals, or any combination of lower-cost cards as long as their total cost is 5 or below.
+
+## Arena Mode
+In the arena, players pay in-game currency or real money in order to enter a competition. Players may win up to 12 times, but if a player loses 3 times, the arena run is over. Players with equal records are matched, i.e. those who have won 4 times and have lost 2 times will be matched up with other players with a 4-2 record for that run. This is a measure set in place to balance the games being played. At the end of the arena run, players are rewarded based on their performance.
+
+# Data Source
+Since the game was released in beta, there have been websites for players to track their progress in these arena matches on websites such as [Arena Mastery](http://www.arenamastery.com). A player may keep track of which cards they had in their deck, how many wins/losses they ended their run with, and even which heroes they lost to. Because *Blizzard Entertainment,* the game's creator, has not released an API for this game, these websites are the best way for outsiders to acquire quantitative information on gameplay. The webmaster and developer of [Arena Mastery](http://www.arenamastery.com) made available a de-personalized portion of this data for use in this project. This subset includes data from the game's release until late November, 2014, over 90,000 completed decks by over 9,000 unique players in total. It is because of his hard work and the self-reporting of scores and decks from players around the world that this work was made possible.
+
+# Procedure
+The first order of business was to read the tables into R Studio. The file was a SQL library, so I accessed it using `library(RMySQL)`. The website data is stored in multiple SQL tables, cross-referenced by keys like `arenaId` or `arenaPlayerId`. In many cases, I leveraged SQL queries to reduce unnecessary data intake when loading the tables; this reduced processing time substantially.
+
+```{r, message=FALSE}
+require(ggplot2)
+require(dplyr)
+require(RMySQL)
+require(grid)
+require(lubridate)
+db <- src_mysql(dbname = 'AMDB', host = 'localhost', user="root", password="root",unix.sock="/Applications/MAMP/tmp/mysql/mysql.sock")
+
+drv <- dbDriver("MySQL")
+
+con <- dbConnect(drv, host = 'localhost', user="root", password="root", dbname = 'AMDB',unix.sock="/Applications/MAMP/tmp/mysql/mysql.sock")
+
+dbListTables(con)
+```
+
+The tables accessed in this study are described below:
+- `arenaCards`: All Hearthstone cards
+- `arenaArena`: All arena results
+- `arenaDraftRow`: Records of arena "picks" but not the individual cards
+- `arenaDraftCards`: The cards associated with the picks tracked in arenaDraftRow
+- `statEras`: Events that mark different periods to track updates/expansions/changes to the game
+- `arenaClass`: All 9 Hearthstone classes
+
+In the next sections, these tables will be combined by their relevant keys and tidied for use in the study. Along the way, some exploratory analysis will be shared.
+
+## Tidying the Card Pool Table
+The `arenaCards` table contains the list of cards a player may choose when selecting his or her deck. The variables in this table are as follows
+- `cardId`: A unique numeric card identifier
+- `cardName`: Name of the card
+- `cardSet`: The set to which the card belongs (i.e. original release or expansion)
+- `cardRarity`: A factor determining the level of rarity of the card (common, rare, epic, or legendary)
+- `cardType`: Is the card a minion/creature, a spell, or a weapon
+- `cardClass`: Which class can use the card (0 is common to all classes)
+- `cardCost`: The card's mana cost
+
+```{r cache=TRUE, warning=FALSE}
+# Read the arena card SQL table
+cardPool<-dbGetQuery(con, "SELECT cardId, cardName, cardSet, cardRarity, 
+                            cardType, cardClass, cardCost FROM arenaCards")
+
+# Relabel the card types from 1,2,3 to Minion, Spell or Weapon
+cardPool$cardType<-factor(cardPool$cardType,levels=c(1,2,3),
+                                 labels=c("Minion","Spell","Weapon"))
+
+# Relabel the card rarities (two lines because of "common" factor cleanup)
+cardPool$cardRarity<-as.factor(cardPool$cardRarity)
+levels(cardPool$cardRarity)<-c("Common","Common","Rare","Epic","Legendary")
+
+# Relabel card class
+cardPool$cardClass<-factor(cardPool$cardClass,levels=c(0:9),c("Neutral","Druid","Hunter","Mage","Paladin","Priest","Rogue","Shaman","Warlock","Warrior"))
+
+# Filter out cards unavailable during Arena Drafts (promotional or quest reward cards)
+cardPool<-filter(cardPool,!(cardSet %in% c(10,11)))
+```
+
+### Exploratory Analysis: Card Pool
+At this stage, we can do a little exploratory analysis on the cards available to each player.
+
+```{r}
+summary(cardPool$cardClass)
+summary(cardPool$cardRarity)
+prop.table(table(cardPool$cardRarity))
+summary(cardPool$cardType)
+prop.table(table(cardPool$cardType))
+```
+As of this data set (including release and Naxxramas expansion cards), each class has 26 cards unique to them and 174 cards shared in a neutral pool (200 cards are available to each class). About there is roughly a 60/20/10/10% split of Common/Rare/Epic/Legendary cards, and approximately 60% of all cards are minion cards.
+
+A row-wise proportion table indicates the spread of card types by class. Note that Neutral cards may only be minions.
+```{r}
+prop.table(table(select(cardPool,cardClass,cardType)),1)
+```
+
+Finally, a simple histogram of card resource ("mana") cost reveals that many of the cards are low-cost.
+```{r echo=FALSE, fig.width=3,fig.height=3}
+qplot(cardPool$cardCost,bin=1,fill=I("gold"),color=I("black"))+
+  xlab("Card Cost")+
+  scale_x_continuous(breaks=seq(0,10,by=1),limits=c(0,11))+
+  theme_bw()
+```
+
+This means that many cards can be played within the first several turns, speeding up game play. Later, we will look at the distribution of mana costs for individual arena decks.
+
+## Arena Records and Draft Picks
+With the card pool in place, the next step was to load the arena records themselves. The variables of interest are as follows:
+- `arenaId`: A unique identifier for the arena run
+- `arenaPlayerId`: A unique player ID (account number)
+- `arenaClassId`: The ID of the class being played during the arena run
+- `arenaOfficialWins`: Number of wins
+- `arenaOfficialLosses`: Number of losses
+- `arenaWins`: Number of wins (not including "disconnects")
+- `arenaLosses`: Number of losses (not including "disconnects")
+- `arenaRetireEarly`: Did the player end the run early
+- `arenaStartDate`: When was the arena deck selected, starting that run
+
+```{r, cache=T}
+unixEpoch<-ymd("1970-01-01")
+# Load in arena eras to automatically select dates of interest
+arenaEras<-dbGetQuery(con,"SELECT * FROM statEras")
+# Convert Arena Eras to UTC date/times
+arenaEras$eraStart<-unixEpoch+seconds(arenaEras$eraStart)
+arenaEras$eraEnd<-unixEpoch+seconds(arenaEras$eraEnd)
+
+arenaRecords<-dbGetQuery(con, "SELECT arenaId, arenaPlayerId, arenaClassId, arenaOfficialWins \"officialWins\",
+                              arenaOfficialLosses \"officialLosses\", arenaWins \"wins\", arenaLosses \"losses\",
+                              arenaRetireEarly \"retire\", arenaStartDate
+                              FROM arenaArena") %>%
+  filter(!is.na(wins),!is.na(losses),retire==0)
+
+# A list of classes and their corresponding labels was extracted from the SQL database and applied to the record info
+classes<-dbGetQuery(con, "SELECT * FROM arenaClass")
+arenaRecords$arenaClassId<-factor(arenaRecords$arenaClassId,c(1:9),classes[,2])
+# Convert Arena Records to UTC date/times
+arenaRecords$arenaStartDate<-unixEpoch+seconds(arenaRecords$arenaStartDate)
+
+# Only take arena entries starting at official release
+release.official<-arenaEras[13,4]
+release.naxx<-arenaEras[20,4]-days(9) # account for early availability of naxx cards
+endofdata<-max(arenaRecords$arenaStartDate)
+
+arenaRecords<-filter(arenaRecords,arenaStartDate>=release.official)
+head(arenaRecords,n=5)
+```
+
+The `arenaRecords` dataframe now contains the records for all players since the official release (March 11, 2014) until November 11, 2014. This includes a total of `r length(unique(arenaRecords$arenaPlayerId))` unique player IDs and `r length(unique(arenaRecords$arenaId))` games. These numbers will decrease when we impose the requirements that players have chosen to record their entire deck and will depend on the choice of era span. In most cases, this report will look at "vanilla" *Hearthstone*, i.e. the official release period before the *Naxxramas* expansion cards were introduced.
+
+### Exploratory Analysis: Official vs. Reported wins/losses
+Here, I made the choice to only look at reported ("unofficial") wins and losses, rather than official outcomes. Players have the option to flag a win or a loss as if the game ended in either opponent disconnecting early. For example, if a player's connection to the server fails and causes a game loss, that player may choose to report the loss, or evaluate his/her standing at the time of disconnect and flag the game as a "win." Out of `r nrow(arenaRecords)` arena games, games flagged in this way account for an over-reporting of wins by `r round(100*with(arenaRecords, sum(officialWins-wins,na.rm=T)/sum(officialWins,na.rm=T)),2)`% and an under-reporting of losses by `r round(100*with(arenaRecords, sum(officialLosses-losses,na.rm=T)/sum(officialLosses,na.rm=T)),2)`%.
+
+```{r eval=FALSE,echo=FALSE}
+with(arenaRecords, sum(officialWins-wins,na.rm=T)/sum(officialWins,na.rm=T))
+with(arenaRecords, sum(officialLosses-losses,na.rm=T)/sum(officialLosses,na.rm=T))
+```
+
+Player honesty is not a subject of this study, however, there is little incentive to inflate one's own record intentionally. Furthermore, this study aims to study the performance of the decks themselves, without convoulting factors like internet connection.
+
+## Deck Selection
+The final component of tidying was to import and select the relevant information from each game's card selection process. The `arenaDraftCards` database contains records of each card that was offered to a player for selection and makes note of which were selected. Note that here I also query the `arenaDraftRow` database. This is because the `arenaId` values were incomplete in the `arenaDraftCards` database.
+
+```{r cache=TRUE}
+arenaDraftCards<-dbGetQuery(con, "SELECT draftId, cardId, arenaId, rowId, isSelected FROM arenaDraftCards")
+
+arenaDraftPool<-dbGetQuery(con, "SELECT rowId, arenaId, pickNum FROM arenaDraftRow")
+
+# First establish a way to query the full card record by era
+# (defaulting to post-release and pre-Naxxramas expansion)
+fullCardRecord=function(eraStart=release.official,eraEnd=release.naxx,selectsOnly=T){
+  cardRecord<-left_join(arenaDraftPool,arenaDraftCards,by="rowId")%>%
+    left_join(cardPool,by="cardId") %>%
+    select(-ends_with(".y")) %>%
+    rename(arenaId=arenaId.x) %>%
+    left_join(arenaRecords,by="arenaId") %>%
+    filter(arenaStartDate>=eraStart, arenaStartDate<eraEnd) %>%
+    filter(arenaId %in% arenaId[which(pickNum==30)]) # Only consider complete decks
+  
+  if(selectsOnly){cardRecord<-filter(cardRecord,isSelected==1)}
+
+# Rename levels
+levels(cardRecord$arenaClassId)<-c("Druid","Hunter","Mage","Paladin","Priest","Rogue","Shaman","Warlock","Warrior")
+
+return(cardRecord)
+}
+```
+
+The `fullCardRecord()` function now produces a record of which cards were available, which were selected, who chose the cards (`arenaPlayerId`) and their success. The default time window is post-release and pre-Naxxramas expansion and the default is to only look at selected cards (the deck that was chosen among the options presented).
+
+### Subsetting: Deck Recording
+Because the deck entry process involves extra steps (i.e. manually indicating which cards were shown or importing the selection), not everyone takes the time to enter these details. Unfortunately, only about 34% of all games have a complete deck associated with them.
+
+```{r}
+nrow(filter(arenaDraftPool,pickNum==30,arenaId %in% unique(arenaRecords$arenaId)))/length(unique(arenaRecords$arenaId))
+```
+
+```{r,echo=FALSE,eval=FALSE}
+arenaID.rec<-unique(fullCardRecord(eraEnd=endofdata)$arenaId)
+wins.rec<-filter(arenaRecords,arenaId %in% arenaID.rec)$wins
+wins.notrec<-filter(arenaRecords,!(arenaId %in% arenaID.rec))$wins
+
+t.test(wins.rec,wins.notrec, var.equal=FALSE, paired=FALSE)
+```
+
+As shown above, I only look at decks for which a full set of 30 cards was recorded (records for which there is a `pickNum==30`). Approximately 95% of players who start recording their deck complete the process.
+
+```{r}
+sum(arenaDraftPool$pickNum==30)/sum(arenaDraftPool$pickNum==1)
+```
+
+The rest of this study will focus only on complete decks (results from `r length(unique(fullCardRecord()$arenaId))` games for post-release and pre-expansion). It should be noted that this sampling is not randomly obtained; players elect to record their cards. A student's t-test reveals that the mean win rates are slightly lower (by ~0.5 wins with 95% confidence) for those who have recorded their decks versus those who have not. While this discussion can still provide insight, it represents a portion of [Arena Mastery's](http://www.arenamastery.com) games which represent a small sample of the *Hearthstone* player base.
+
+## Exploratory Analysis: Appearance of Rare, Epic, and Legendary Cards
+
+Having determined what fraction of all [Arena Mastery](http://www.arenamastery.com) players record complete decks, we can explore the rate at which cards of a given rarity are shown. Each time a player is shown 3 cards, those cards are all of the same rarity. However, the appearance of rare, epic, and legendary cards is probabilistic; one player may get to choose among 3 legendary draft rounds whereas another might see none.
+
+```{r}
+prop.table(table(fullCardRecord()$cardRarity))
+```
+
+The proportion table above looks at the default era window of post-release and pre-expansion. This shows that a given draft round will consist of common cards ~79% of the time, rare cards ~17% of the time, epic cards ~3% of the time, and legendary cards <1% of the time.
+
+# Overall Deck Characteristics and Win Rate
+Now that deck composition is associated with the record of each player, we can start to tease out some characteristics from a  a broad scope. To aggregate the deck win rates for each class, I used the `dplyr` library and the `summarise()` function on the selected cards(`fullCardRecord()`). I was primarily interested in the mean and median mana cost of the cards in the deck as well as the number of cards that were class-specific (`classCount`). Finally, I merged the result with a `left_join` of the records from above by `arenaId`.
+
+```{r}
+# Overall deck success
+winsByID<-fullCardRecord() %>%
+  group_by(arenaId) %>%
+  summarise(
+    manaCost.median=median(cardCost),
+    manaCost.mean=mean(cardCost),
+    minionCount=sum(cardType=="Minion"),
+    spellCount=sum(cardType=="Spell"),
+    classCount=sum(cardClass!="Neutral"),
+    rareCount=sum(cardRarity=="Rare"),
+    epicCount=sum(cardRarity=="Epic"),
+    legendCount=sum(cardRarity=="Legendary")
+  ) %>%
+  left_join(arenaRecords,by="arenaId")
+```
+
+## Win Distribution by Card Rarity
+It makes sense to start at the one aspect a player has no control over: how many legendary, epic, or rare cards are in his or her deck. To investigate this, I grouped `winsByID` by the class being played and the number of rare, epic, and legendary cards in each deck and took an average of the number of wins for those decks. Since not every class has access to the same pool of cards, these were faceted by class and the mean win rate was normalized to the win rate of that class. The standard error was calculated by taking the standard deviation of wins divided by the square root of bouts with that number of cards. Finally, I filtered out points for which there were 50 or fewer games being averaged.
+
+```{r}
+meanClassWins<-winsByID %>%
+  group_by(arenaClassId) %>%
+  summarise(classWinMean=mean(wins))
+
+rareWins<-winsByID %>%
+  group_by(arenaClassId,cardCount=rareCount) %>%
+      summarise(
+        meanWins=mean(wins),
+        count=length(cardCount),
+        se=sd(wins)/sqrt(count)
+      )%>%
+  filter(count>50) %>%
+  left_join(meanClassWins,by="arenaClassId")%>%
+  mutate(winDiff=meanWins-classWinMean,
+         label="Rare")
+
+epicWins<-winsByID %>%
+  group_by(arenaClassId,cardCount=epicCount) %>%
+      summarise(
+        meanWins=mean(wins),
+        count=length(cardCount),
+        se=sd(wins)/sqrt(count)
+      )%>%
+  filter(count>50)%>%
+  left_join(meanClassWins,by="arenaClassId")%>%
+  mutate(winDiff=meanWins-classWinMean,
+         label="Epic")
+
+legendWins<-winsByID %>%
+  group_by(arenaClassId,cardCount=legendCount) %>%
+      summarise(
+        meanWins=mean(wins),
+        count=length(cardCount),
+        se=sd(wins)/sqrt(count)
+      )%>%
+  filter(count>50)%>%
+  left_join(meanClassWins,by="arenaClassId")%>%
+  mutate(winDiff=meanWins-classWinMean,
+         label="Legendary")
+
+rarity<-rbind(rareWins,epicWins,legendWins)
+rarity$label<-factor(rarity$label,levels=c("Rare","Epic","Legendary"))
+```
+
+```{r,echo=FALSE}
+ggplot(data=rarity)+
+geom_hline(aes(yintercept=0))+
+geom_point(aes(x=cardCount,y=winDiff,color=label))+
+geom_errorbar(aes(ymax=winDiff+se,ymin=winDiff-se,x=cardCount,color=label),width=0.25)+
+scale_colour_manual(values = c("Blue","Purple", "Orange"))+
+xlab("Number of Cards")+
+ylab("Change in Average Wins")+
+  ggtitle("Change in Win Rate vs. Number of Uncommon Cards")+
+facet_wrap(~arenaClassId)+
+theme_bw()+
+theme(legend.title=element_blank())+
+scale_x_continuous(breaks=seq(0,10,2))
+```
+
+Thankfully for the player, there doesn't seem to be a strong trend of card rarity and improvement over mean win rate for the class. The only exception seems to be the druid class, for which more rare and epic cards tend to improve win rate. Granted, not all legendary, epic, and rare cards are equally strong. Other factors will affect win rate, such as which card was selected and whether those cards were ultimately drawn and played at the right time.
+
+## Win Distributions by Class
+The first basic choice a player makes upon entering the arena is which class to play. On [Arena Mastery](http://www.arenamastery.com), users are presented with a histogram of all arena players regardless of the hero class they chose. This is useful, but there is more information in the distribution of win rates for all classes, taken separately:
+
+```{r, echo=FALSE}
+ggplot(data=winsByID,aes(x=wins))+
+  geom_histogram(position="identity",binwidth=1)+
+  facet_wrap(~arenaClassId)+
+  theme_bw()+
+  scale_x_continuous(breaks=seq(0,12,2))
+```
+
+This sort of plot gives a greater sense of the disproportion of games played by each class. Clearly, mages and paladins are played quite often and have a relatively high count of 12-win arena bouts. Warlocks and hunters, on the other hand, are played the least and have relatively few 12-win bouts.
+
+## Deck Cost and Win Rate
+During card selection, players are shown a distribution card mana cost in their deck. To an extent, a player can control whether their deck has more or fewer low-mana cost cards. Some classes play well in late-game and some in early-game situations. Below is a plot of win rate vs. mean and median deck mana cost, faceted by class.
+
+```{r}
+manaCost<-winsByID %>%
+  group_by(arenaClassId,wins) %>%
+  summarise(
+    deckMean=mean(manaCost.mean),
+    deckMedian=mean(manaCost.median)
+    )
+```
+
+```{r, echo=FALSE}
+ggplot(data=manaCost)+
+  geom_point(aes(x=deckMean,y=wins, color="Mean Cost"))+
+  geom_point(aes(x=deckMedian,y=wins,color="Median Cost"))+
+  facet_wrap(~arenaClassId,ncol=3)+
+  ggtitle("Deck win rate vs. mean and median mana cost")+
+  xlab("")+
+  ylab("Deck Win Record")+
+  theme_bw()+
+  theme(legend.title=element_blank())+
+  scale_x_continuous(breaks=seq(3,4.5,0.5))
+```
+
+Most decks are skewed right (mean mana cost is greater than median mana cost) which indicates a focus on early-game cards. Paladin decks tend to share the same mean and median around 3.75 mana. Furthermore, we can start to see trends among classes. For example, warlock and hunter decks tend to have lower mean and median costs than mage and druid decks. Here, although I have plotted Deck Win Record against mean and median cost, there are no overwhelming trends.
+
+## Card Selection and Win Rate
+The final player choice I will cover in this section is the individual card selection. Since every player is shown a random set of cards from which to choose, it is difficult to separate those who make poor selections from those who have bad luck, i.e. those who do not pick the best cards vs. those who cannot. In the data set, cards are recorded whether they are selected (`isSelected==1`) or not (`isSelected==0`); so, an objective measure of card popularity would be to normalize a card's selection by how often it appeared as an option. NOTE: here we ignore legendary cards since they do not appear often enough overall to be a significant factor in deck success.
+```{r}
+cardPoolFull<-select(fullCardRecord(selectsOnly=F),cardName,cardId,cardRarity,
+                     cardType,arenaClassId,cardClass,isSelected,wins)
+
+mostPickedCards=function(whichClass,winrate=c(0:12)){
+  cardPoolFull %>%
+    filter(wins %in% winrate,             # only the win rate of interest
+           arenaClassId %in% whichClass,  # only the hero class of interest
+           cardRarity!="Legendary"        # exclude legendary cards
+           ) %>% 
+    group_by(arenaClassId,cardId) %>%
+    summarise(
+      name=first(cardName),
+      type=first(cardType),
+      cardRarity=first(cardRarity),
+      timesPicked=sum(isSelected==1),
+      timesSeen=length(cardId),
+      percentPicked=timesPicked/timesSeen
+    ) %>%
+    ungroup %>%
+    arrange(desc(percentPicked))
+}
+```
+
+The popularity of cards for lower win-rate decks and higher win-rate decks differs. For example, here I look at the 15 most popular cards among mage decks with 1 win and mage decks with 12 wins.
+
+```{r}
+lowerMage<-mostPickedCards("Mage",1) %>%
+  select(name.1win=name,popularity.1win=percentPicked)
+lowerMage<-data.frame(lowerMage,rank=rank(desc(lowerMage$popularity.1win)))
+
+higherMage<-mostPickedCards("Mage",12) %>%
+  select(name.12wins=name,popularity.12wins=percentPicked)
+higherMage<-data.frame(higherMage,rank=rank(desc(higherMage$popularity.12wins)))
+
+hiLoComp<-left_join(lowerMage,higherMage,by="rank")[1:50,]
+hiLoComp[1:15,]
+```
+
+It is clear that the order of most popular cards compared here is different for 1- and 12- win decks. If the order and pick percentage were the same for both 1- and 12-win decks, the difference in success for these decks would more likely come solely from gameplay. This supports that the selection of cards themselves plays a role in distinguishing high performers from low performers. It also makes the game more interesting; win or lose, not everyone values card in the same way.
+
+While it may seem trivial that players with successful decks choose cards differently than those with less successful decks, the difference in popularity across win levels and across classes can be a useful tool in determining which cards are more likely to produce high performance decks. To explore these differences, the `percentPicked` variable is now plotted against deck win rate using `picksbywins()`, which takes as its arguments the names of the cards of interest and the classes who chose those cards.
+
+## Conclusions
+In this section, we evaluated some of the factors during arena deck selection that might affect player success with that deck. We started with aspects out of one's control, such as the deck rarity and saw no strong trends that support deck rarity affecting win rate. Next, we took a closer look at the distribution of win rates among each class, noting the overwhelmingly popular (and successful) Mage and Paladin decks compared to the less popular (and less successful) Warlock and Warrior decks. We took a brief look at how card mana cost varies from class to class, seeing no trends in win rate, but noting differences from class to class. Finally, we looked at one case of card popularity among 1- and 12-win mage decks, noting a difference in the order and in the pick fraction of the top 15 cards.
+
+Next, I aim to use the data and some of the methods described above in order to help players choose their cards during each draft round.
+
+# Card Recommendation
+Currently, there are several popular spreadsheets written by skilled players advising which cards to choose during an arena draft. These tables are based largely on experience and are updated about once every major game patch, sometimes with a significant delay.
+
+It would be valuable to suggest cards to players in real time based on recent data and other players' performance. I propose two visual schemes that will give the player more information while selecting cards during an arena draft.
+
+## Popularity of a card for a given win rate
+Before, I showed a ranked list of popular cards for the mage class at 1 and 12 wins. Here, I write a function that will produce a plot of card popularity versus deck success. This should give the player an overall idea of a card's popularity as well as an idea of trends that might show a card's increased (or decreased) popularity as a function of win rate.
+
+```{r}
+picksbywins=function(whichClass=c("Druid", "Hunter", "Mage", "Paladin",
+                                  "Priest","Rogue","Shaman","Warlock", "Warrior"),
+                     whichCards){
+  pickRate<-cardPoolFull %>%
+    filter(cardName %in% whichCards,arenaClassId %in% whichClass) %>%
+    group_by(arenaClassId,cardName,wins) %>%
+    summarise(
+      percentPicked=sum(isSelected==1)/length(cardId)
+    )
+  ggplot(data=pickRate)+geom_point(aes(x=wins,y=percentPicked,color=cardName,size=4))+
+    xlab("Number of Wins")+
+    ylab("Times Picked / Times Seen")+
+    theme_bw()+
+    theme(legend.position="none")+
+    scale_x_continuous(breaks=seq(0,12,2))+
+    facet_wrap(~cardName)+
+    theme(strip.text = element_text(size=25),
+          axis.title.x = element_text(size=20),
+          axis.text.x  = element_text(vjust=0.5, size=16),
+          axis.title.y = element_text(size=20),
+          axis.text.y  = element_text(vjust=0.5, size=16))
+}
+```
+
+For example, among all classes who see the "Argent Squire" it tends to be picked more often in high-performance Warlock decks.
+```{r}
+picksbywins(whichCards="Argent Squire")+facet_wrap(~arenaClassId)+
+    ggtitle("Pick Percentage of \"Argent Squire\" vs. Win Record")
+```
+
+Furthermore, while cards like "Bloodsail Raider" can be used by all classes, they provide a particular benefit for Warriors, Rogues, Shamans, and Paladins. This is reflected by those classes picking the card more often, in general.
+```{r}
+picksbywins(whichCards="Bloodsail Raider")+facet_wrap(~arenaClassId)+
+    ggtitle("Pick Percentage of \"Bloodsail Raider\" vs. Win Record")
+```
+
+While these can provide insight on a card-by-card basis, the information can help players choose their cards, based on the popularity of the three cards they are shown:
+
+```{r}
+picksbywins(whichCards=c("Bloodsail Raider","Mad Bomber","Chillwind Yeti"),whichClass="Warlock")+
+  ggtitle("Pick Percentage of Cards vs. Number of Wins in Warlock Decks")
+```
+
+Based on this plot, a player would be advised of the popularity of "Chillwind Yeti" across all win-rates and the increasing popularity of "Mad Bomber" as win rates increase. That is, players of high-performance deck value "Mad Bomber" more than those with low-performance decks. This is a functionality that could be added to stat-tracking sites like [Arena Mastery](http://www.arenamastery.com) in order to provide further insight in card selection for its users.
+
+## Number of Card Copies and Win Rate
+In Arena mode, players may choose as many duplicate copies of a card as they are offered. In the previous section, we explored how a player might use the data gathered by [Arena Mastery](http://www.arenamastery.com) to choose **which card** of the three they are shown during each draft round. In this section, we will explore ways to visually indicate **how many** of that card to choose.
+
+This type of analysis has already been popularized on [wowmetrics.com](http://www.wowmetrics.com/hearthstone/cardwins/index.html) using a version of the same data from [Arena Mastery](http://www.arenamastery.com). 
+The site tabulates the change in mean win rate of decks with 0-4 copies of a given card compared to the mean win rate of the class playing that card. Some cards are associated with a *decrease* in deck performance when any number of cards is included. These were interpreted as poor performers. Other cards increase win rate with 1-2 copies but decrease win rate with 3-4 copies.  More isn't always better.
+
+The tabulation on wowmetrics.com is a great exploratory tool for an enthusiast to explore how more copies of a card can affect win rate. I wanted to provide a more visual version of this table for cards of interest, indicating not only the improvement in win rate but standard error bars associated with the averaged win rate. I'll admit, error bars are not the most user-friendly; however, with a little bit of practice, they can provide an important layer of visual information over tabulated values.
+
+This function takes as its arguments the class (`whichClass`) and cards (`whichCards`) of interest to the player. It calculates the mean wins of the class, loads a full card record (selects only) and then finds which decks have how many of each card of interest and averages the wins for each deck, calculating a standard error based on the number of decks that contained that many cards. Finally, the result is plotted, facetted by card name.
+```{r, warning=FALSE}
+copyPerformance=function(whichClass,whichCards){
+  recordsOfInterest<-filter(fullCardRecord(),arenaClassId==whichClass)
+  
+  meanWins<-mean(recordsOfInterest$wins)
+  
+  # Loop through each card to get a 0-4 copy tally of results
+  checkCards=NULL
+  for(i in whichCards) {
+  eachSpread<-recordsOfInterest %>%
+    filter(arenaClassId==whichClass) %>%
+    group_by(wins,arenaId) %>%
+    summarise(queryCard=sum(cardName==i)) %>%
+    group_by(queryCard) %>%
+    summarise(deckCount=length(queryCard),
+              winDiff=mean(wins)-meanWins,
+              se=sd(wins)/sqrt(deckCount)) %>% # standard error
+    mutate(cardLabel=i) %>%
+    filter(deckCount>=50)
+  checkCards<-rbind(checkCards,eachSpread)
+  }
+
+  ggplot(data=checkCards)+
+  geom_bar(aes(x=as.factor(queryCard),y=winDiff,fill=cardLabel),stat="identity")+
+  geom_errorbar(aes(ymax=winDiff+se,ymin=winDiff-se,x=as.factor(queryCard)), width=0.25)+
+  xlab("Card Copies")+
+  ylab("Change in mean wins")+
+  geom_hline(yintercept=0)+
+  theme_bw()+
+  theme(legend.position="none")+
+  facet_wrap(~cardLabel)
+}
+
+copyPerformance("Mage",whichCards=c("Mana Wyrm","Flamestrike","Amani Berserker"))
+```
+
+The `picksbywins()` and `copyPerformance()` functions can then by combined to produce a succinct set of information for the player.  
+
+```{r, warning=F}
+require(grid)
+draftRec=function(cards, class){
+pushViewport(viewport(layout = grid.layout(2, 1)))
+print(picksbywins(whichCard=cards,whichClass=class)+
+  facet_wrap(~cardName), vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(copyPerformance(whichCards=cards,whichClass=class),
+      vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+}
+
+draftRec(class="Mage",cards=c("Mana Wyrm","Flamestrike","Amani Berserker"))
+```
+
+## Use Case: How does this help?
+### Case 1: A player has none of the cards shown
+A player with neither of the cards shown above would have zero copies in his or her deck. First, the player notices that *Flamestrike* is the most popular card of the three. Next, the player notes that not having an *Amani Berserker* would not change the win rate (the error bars overlap with the x axis) but, having zero *Flamestrike*s is shown to reduce mean win rate by 0.5 wins. The player would be advised to choose *Flamestrike* since, of the three, it is not only the most popular, but produces the greatest shift in win rate from 0-1.
+
+### Case 2: A player already has 3 Flamestrikes and neither of the other two
+The player has been selecting the popular *Flamestrike* and has three (lucky her). We see that increasing the number of *Flamestrike*s increases expected mean win rate by over 1 win from 0-3. However, the error bar on the mean win rate of decks with 4 *Flamestrike*s overlaps with the 3-card decks. Adding another Flamestrike is ill advised when a player can add a *Mana Wyrm* instead, even though the *Mana Wyrm* card is less popular.
+
+## Conclusions
+Leveraging the extensive data collected on [Arena Mastery](http://www.arenamastery.com) and taking cues from [wowmetrics.com](http://www.wowmetrics.com/hearthstone/cardwins/index.html), a player can be shown the relative popularity of each card in a draft round and the effect of multiple copies of that card on average win rate. In this way, a player can make a more informed decision based on real (and current) information. As always, draft selection is up to the player and this information is meant to enrich his or her decision rather than force it. Given that the player will likely only see this information while creating a new deck, any choices made contrary to "popular picks" will be added to the data pool for the next user to leverage.
+
+
+
+
+
+
+## Appendix: Value slopes
+```{r}
+pickTips=function(whichClass=c("Druid", "Hunter", "Mage", "Paladin", "Priest","Rogue","Shaman","Warlock", "Warrior")){
+  pickRate<-cardPool.abbr %>%
+    filter(arenaClassId==whichClass,cardSet!=12)
+  cards<-unique(pickRate$cardName)
+  cardList<-data.frame()
+  for(i in cards){
+    cardProb<-pickRate %>%
+      filter(cardName==i) %>%
+      group_by(cardId,wins)%>%
+      summarise(
+        timesPicked=sum(isSelected==1,na.rm=T),
+        timesSeen=length(wins),
+        percentPicked=timesPicked/timesSeen
+      )
+    cardSlope<-lm(cardProb$percentPicked ~ cardProb$wins)$coeff[2]
+    cardInt<-lm(cardProb$percentPicked ~ cardProb$wins)$coeff[1]
+    cardPick<-cardInt+cardSlope*12
+    cardList<-rbind(cardList,data.frame(name=i,tilt=cardSlope,popularity=cardPick))
+  }
+}
+```
+
+
+# Appendix: Card Popularity and Rank
+
+```{r}
+# Compare pick percentage vs. rank between 1- and 12- win decks
+require(reshape2)
+popCompare<-melt(select(hiLoComp,-name.12wins,-name.1win),id.vars="rank")
+ggplot(data=popCompare)+
+  geom_line(aes(x=rank,y=value,color=variable),lwd=2)+
+  annotate(geom="text",label="12 wins",x=30,y=0.78)+
+  annotate(geom="text",label="1 win",x=20,y=0.68)+
+  ylim(c(0.5,1.0))+
+  ylab("Pick Fraction")+
+  xlab("Popularity Rank")+
+  ggtitle("Pick Fraction of Cards of a Given Rank for 12- and 1-win decks")+
+  theme_bw()+
+  theme(legend.position="none")
+```
+
+The range of popularities themselves is narrower for the top 20 cards in 12-win decks than in the 1-win decks. This indicates not only that higher-win decks are created with different priorities in mind, but that the cards themselves are chosen with more uniform popularity.
