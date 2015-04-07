@@ -6,8 +6,10 @@ output: html_document
 ---
 
 ## Goals:
-- Primary: Use the player-reported *Hearthstone: Heroes of Warcraft* Arena deck composition to predict deck success.
-- Secondary: Help players make data-driven decisions while selecting their decks
+Use the player-reported *Hearthstone: Heroes of Warcraft* Arena deck composition to predict deck success.
+
+## Methods and Techniques:
+This study made use of MySQL to access card data and made extensive use of the `dplyr` and `caret` libraries for data frame manipulation and machine learning, respectively. For modeling, I used Random Forest and Gradient Boosting Machines (GBM), evaluating model performance using area under the receiver operating characteristic (ROC) curve. The source code for this report can be found at my [GitHub repository](https://github.com/alexuadler/hearthstone/blob/master/HS-ML.R).
 
 ## About the Game:
 *Hearthstone* is turn-based electronic card game where players assume the role of one of nine heroes including a mage, a rogue, and a warrior. Each hero competes using 30-card decks of creatures (minions), spells, and weapons to reduce their opponent's health points to zero. These decks may contain any combination of cards from a pool of common cards and cards that only that hero may weild. For instance, mages have access to *Fireball*, but not to *Fiery War Axe*--a warrior card--whereas both have access to the *Abomination*. This study focuses on Arena Mode, where players craft their decks by drafting one card at a time, making this choice among three random cards each round. Since players do not know which cards may appear in later rounds, they must choose these cards based on their perceived value among the cards shown or based on any synergy among the cards they have already selected.
@@ -213,8 +215,7 @@ mean(win.ttest$conf.int)
 To sum up, deck lists associated with the win rates of over 90,000 games have been cleaned, merged, and subsetted. The next steps were to determine which features 
 
 ##Feature Generation
-The data were rich with information about each card, however there were some other features that might be useful in predicting the success of a deck. For example, some players value cards that allow them to draw more cards when played. Some might value minions that "taunt" other minions, thereby protecting their life points. Furthermore, the original data set had information about which cards were selected and which were seen in a given draft round. From this information, I can learn the popularity of a card among the community of players reporting the data and get some measure as to the strength (or perceived strength) of that card.
-
+The data were rich with information about each card, however there were some other features that might be useful in predicting the success of a deck. For example, some players value cards that allow them to draw more cards when played. Some might value minions that "taunt" other minions, thereby protecting their life points. Furthermore, the original data set had information about which cards were selected and which were seen in a given draft round. From this information, I can learn the popularity of a card among the community of players reporting the data and get some measure as to the strength (or perceived strength) of that card. Finally, I wanted some idea of the strength of an individual card measured by how the mean win rate of decks with one or more copies of that card differed from those with no copies.
 
 ### Detailed Card/Deck Attributes (Parsing Card Text)
 Since some of the most powerful aspects of a card are written in the card text. This text was parsed for certain functions and those were stored as a boolean variable.
@@ -267,7 +268,7 @@ The complete list of card abilities was added to the provided list of card attri
 Since every player is shown a random set of cards , it is difficult to separate those who make poor selections from those who have bad luck, i.e. those who *do not* pick the best cards vs. those who *cannot.* In the data set, cards are recorded whether they are selected (`isSelected==1`) or not (`isSelected==0`); so, an objective measure of card popularity would be to normalize a card's selection by how often it appeared as an option.
 
 For example, the top 10 cards selected by Mages (among all deck win rates, 0-12) are:
-```{r }
+```{r, echo=FALSE}
 mostPickedCards=function(whichClass,winrate=c(0:12)){
   cardPoolSpec<-select(filter(vanilla,arenaClassId==whichClass),cardId,arenaClassId,isSelected,wins)
   
@@ -292,8 +293,67 @@ kable(select(mageTop10, rank, cardName, round(fractionPicked,2)),format="markdow
 
 These ranks, when averaged among 30-card dekcs, would give some clue as to how many popular cards made it into the deck in question. More popular cards might indicate access to or selection of cards that the population as a whole agreed were "good." Furthermore, each individual card's rank was used to weight the card attributes when summarizing the decks. For example, not all cards with the taunt attribute are created equally. This ensured that a deck with 2 popular taunt cards would receive a different score than a deck with two unpopular taunt cards.
 
+### Card and Deck Swing
+The last feature I wanted to generate was the effective swing of a card. For each card, I calculated the mean win rate of decks without that card then the mean win rate for decks with 1 or more copies of that card, comparing the change in win rate with respect to the mean win rate of the class. For example, the "0-1" swing for *Chillwind Yeti* is +0.1, meaning that decks that have 1 copy of that card average 0.1 wins more than decks with no copies of that card, decks that have 3 copies perform even better. *Flamestrike*, has much greater positive swing values, perhaps suggesting it is a very important card to draft. These values have also been tabulated on [wowmetrics.com](http://www.wowmetrics.com) using a similar data set.
+
+```{r,echo=FALSE, cache=TRUE, warning=FALSE}
+# Find Card Swing (difference between having x of that card and 0 of that card)
+copyPerformance=function(whichClass,recordDB){
+  recordsOfInterest<-filter(recordDB,isSelected==1,arenaClassId==whichClass)
+  
+  meanWins<-mean(recordsOfInterest$wins)
+  
+  # Loop through each card to get a 0-4 copy tally of results
+  checkCards=NULL
+  for(i in unique(recordsOfInterest$cardId)) {
+    eachSpread<-recordsOfInterest %>%
+      group_by(wins,arenaId) %>%
+      summarise(copies=sum(cardId==i)) %>%
+      group_by(copies) %>%
+      summarise(deckCount=length(copies),
+                winDiff=mean(wins)-meanWins) %>% # standard error
+      mutate(cardId=i) %>%
+      filter(deckCount>=50) %>%
+      select(-deckCount)
+    checkCards<-rbind(checkCards,eachSpread)
+  }
+  
+  return(checkCards)
+}
+
+mage.cardCopies<-copyPerformance("Mage",vanilla)
+
+# How do decks perform relative to the mean *without* each card
+mage.zeroSwing<-filter(mage.cardCopies,copies==0) %>%
+  rename(baseSwing=winDiff) %>%
+  select(-copies)
+
+mageSwing<-filter(vanilla,arenaClassId=="Mage",isSelected==1) %>%
+  group_by(arenaId,cardId) %>%
+  summarise(copies=n()) %>%
+  left_join(mage.zeroSwing,by=c("cardId")) %>%
+  left_join(mage.cardCopies,by=c("cardId","copies")) %>%
+  rename(copySwing=winDiff) %>%     # the swing for tha tmany copies
+  mutate(cardSwing=ifelse(!is.na(copySwing),copySwing-baseSwing,0)) %>% # the swing generated by that card
+  group_by(arenaId) %>%
+  summarise(deckSwing=sum(cardSwing))
+
+flamestrikeYeti<-filter(mage.cardCopies, cardId %in% c(25,296)) %>%
+  mutate(cardName=ifelse(cardId==25,"Chillwind Yeti","Flamestrike"))
+
+ggplot(data=flamestrikeYeti)+
+geom_bar(aes(x=as.factor(copies),y=winDiff,fill=cardName),stat="identity")+
+xlab("Card Copies")+
+ylab("Change in mean wins")+
+geom_hline(yintercept=0)+
+theme_bw()+
+theme(legend.position="none")+
+facet_wrap(~cardName)+
+ggtitle("Change in Mean Win Rate vs. Number of Cards for Mage Decks")
+```
+
 ### Feature Generation Summary
-With these features created, each deck was summarized, resulting in the following predictors were present:
+With these features created, each deck was summarized, resulting in the following predictors:
 
 | Predictor Name | Description                                 |
 |----------------|---------------------------------------------|
@@ -319,11 +379,11 @@ With these features created, each deck was summarized, resulting in the followin
 | `classCard`    | score of cards available only to that class, weighted by card popularity    |
 | `avgRank`      | average popularity of the cards in the deck |
 | `top15`        | total cards in the top 15 most popular      |
-|----------------|---------------------------------------------|
+| `deckSwing`    | sum of `cardSwing`                          |
 
 The header of the numeric dataframe of predictors is sampled below:
 
-```{r, echo=FALSE}
+```{r, echo=FALSE, cache=TRUE}
 magesPewPew<-filter(allTime,arenaClassId=="Mage",arenaStartDate<=release.naxx)
 cardPoolRich<-left_join(data.frame(cardPool,card.attr),select(mostPickedCards("Mage",winrate=c(0:12)),cardId,rank),by="cardId")
 cardPoolRich$rank<-ifelse(is.na(cardPoolRich$rank), max(cardPoolRich$rank,na.rm=T)+1,cardPoolRich$rank)
@@ -332,7 +392,6 @@ mageSet<-magesPewPew %>%
   left_join(cardPoolRich,by="cardId") %>%
   group_by(arenaId) %>%
   summarise(
-    #    player=first(arenaPlayerId),
     winCount=first(wins),
     cost.mean=mean(cardCost),
     cost.median=median(cardCost),
@@ -357,15 +416,18 @@ mageSet<-magesPewPew %>%
     avgRank=mean(rank),
     top15=sum(rank<=15)
   ) %>%
+  left_join(mageSwing,by=c("arenaId")) %>%
   select(-arenaId)
 
 head(mageSet)
 ```
 
+Notably missing from this list is a metric card synergy. Many cards are much stronger in tandem than individually. Cursory attempts were made to derive these interactions from the raw data; however, professional players have a stronger sense of this classification. This would be a great metric to add for future work.
+
 ## Feature Selection
 Each hero class plays with a different style, so I chose to model the classes separately. Furthermore, gameplay was potentially changed with the release of the expansion. Here, I use the Mage data as a test case for the original release of the game. This subset resulted in a selection of approximately 11,000 games. 
 
-#### Overview of Features: Correlation Plots
+### Overview of Features: Correlation Plots
 First, I looked at a correlation plot of the features in question, providing some hint of colineariaty among features. 
 
 ```{r}
@@ -373,138 +435,163 @@ require(corrplot)
 corrplot(cor(mageSet),method="ellipse",order="hclust",type="upper")
 ```
 
-Clearly, there is a high degree of colinearity. For some features, high correlation was expected. For example, `dmgSpell` cards are a subset of `damage` cards and are correlated as a result. Furthermore, cards with `buff` tend to cost less mana, explaining the negative correlation between `buff` and `cost.mean`.
+There is a generally low level of colinearity for the features present. For some features, high correlation was expected. For example, `dmgSpell` cards are a subset of `damage` cards and are correlated as a result. However, there is little correlation between any of the predictors and the `winCount` of the decks.
 
-```{r echo=FALSE}
-ggplot(filter(cardPoolRich,hasBuff==T,cardClass %in% c("Mage","Neutral")))+
-  geom_histogram(aes(x=cardCost,stat="identity"),fill="dark green",binwidth=1)+
-  theme_bw()+
-  xlab("Mana Cost")+
-  ylab("Number of Cards with Buff")+
-  ggtitle("Cards with buff have low mana cost")+
-  scale_x_continuous(breaks=0:9)+
-  scale_y_continuous(breaks=seq(0,12,2))
+### A note about Principal Component Analysis
+Principal component analysis (PCA) is a popular method to summarize the description of variance among multiple predictors by selecting a series of principle components along which variance is maximized. However, use of PCA requires a fair degree of colinearity. A high Kaiser-Mayer-Olkin (KMO) index (greater than 0.75) gives some indication of whether PCA is applicable. In this case, however, the KMO index was insufficient (0.58), so PCA was not used.
+
+```{r}
+require(psych)
+## Center and Scale the data
+df.scale <- scale(mageSet, center=T, scale=T)
+df.pca<- principal(r=df.scale,
+                   nfactors=10,
+                   covar=FALSE)
+
+# Run a KMO index test
+KMO(cor(as.matrix(df.scale)))
 ```
 
-However, there is little correlation between any of the predictors and the `winCount` of the decks.
+### Feature selection using Recursive Feature Elimination (`caret`)
+In order to select the most important features, I employed recursive feature elimination (RFE) using the `caret` package. In this case, I used random forest functions to evaluate variable importance and found that up to 18 (out of 24) predictors were necessary to provide significant boosts in accuracy. Below is a plot showing the absolute accuracy vs. number of features. 
 
-#### Overview of Features: Heatmaps & Clustering
-Next, I wished to see how the features clustered among one another. Since the data were all greater than zero and had varying scales (i.e. `winCount` ranged from 0--12 whereas `avgRank` ranged from 27--175), the data had to first be centered and scaled. A heatmap of a stratified 20% of the data provided a visual confirmation that there were some clear clusters:
-
-```{r,cache=TRUE}
+```{r, eval=FALSE}
+# Select Features with RFE
+# define the control using a recursive variable selection function
+rfeControl <- rfeControl(functions=rfFuncs, method="cv", number=10)
 set.seed(1337)
-mageSet.pp <- scale(mageSet, center=T, scale=T)
-hmStrat<-createDataPartition(y=as.factor(mageSet$winCount),p=0.8,list=F)
-heatmap(x=mageSet.pp[-hmStrat,-1]) # heatmap of all predictors
+mage.rfe <- rfe(training[,predictors], training$topHalf, sizes=c(1:20), rfeControl=rfeControl) # 1-20 variables
 ```
 
-From this plot, some clustering by similar values is evident. For example, mean and median deck mana cost are fairly segregated among clusters, and form two somewhat distinct regions of predictor values.
-
-```{r, eval=FALSE,echo=FALSE}
-### Exploratory: Regression subsetting to select variables
-mageSet.regsubs<-regsubsets(x=winCount ~. , data=mageSet,nvmax=20)
-diagnostic <- data.frame(
-  est = c(summary(mageSet.regsubs)$cp,summary(mageSet.regsubs)$bic,summary(mageSet.regsubs)$adjr2),
-  x = rep(1:20, 3),
-  type = rep(c("cp", "BIC","Adj_r2"), each = 20)
-)
-
-ggplot(data=diagnostic)+geom_line(aes(x=x, y=est,color=type))+theme_bw()+
-  facet_grid(type ~ ., scales = "free_y")+
-  theme(legend.position="none")
-
-coef(mageSet.regsubs,5)
-
-mageSet.step <- mageSet
-null=lm(winCount~1, data=mageSet.step)
-full=lm(winCount~., data=mageSet.step)
-mage.step <- step(null, scope=list(upper=full), data=mageSet.step, direction="both")
+```{r,echo=FALSE}
+load("mageRFE")
+topPredictors<-predictors(mage.rfe) # store the subset of most important features
+plot(mage.rfe, type=c("g", "o")) # Plot performance vs. Number of Variables
+print(topPredictors)
 ```
 
-I was less interested in predicting whether a deck would score 9 wins versus 10 and more interested in whether it was "superior" or "inferior". However, further information was needed to decide how to optimally split this category.
+## Modeling Deck Performance
+With a narrowed list of features, I proceeded to set up my training and test sets of data. I focused on Mage decks that were recorded during the original release of the game (approximately 11,000 rows of data). Regression models provided poor accuracy, so categorization was used. Two bins were created: "Good" and "Bad" decks, binned by being above or below the mean win rate, respectively. The models were trained on a randomly selected, stratified 75% of the data. Repeated cross-validation was used to determine optimal performance. Prior to modeling, predictors were checked for near-zero variance.
 
-## Predicting Win Count: Gradient Boosting Machines
 ```{r}
 df<- mageSet %>%
-  mutate(topHalf=as.factor(ifelse(winCount>mean(winCount),"Superior","Inferior"))) %>%
+  mutate(perf=as.factor(ifelse(winCount>mean(winCount),"Good","Bad"))) %>%
   select(-winCount)
 
-labelName<-"topHalf"
-predictors<-names(df)[!(names(df) %in% labelName)]
+labelName<-"perf" # name of observation
+predictors<-names(df)[!(names(df) %in% labelName)] # predictors
 set.seed(1337)
-labelNum<-which(names(df)==labelName)
-inTrain<-createDataPartition(y=df$topHalf,p=0.75,list=F)
+labelNum<-which(names(df)==labelName) 
+inTrain<-createDataPartition(y=df$perf,p=0.75,list=F) 
 training<-df[inTrain,]
 test<-df[-inTrain,]
 
-# Check near-zero variance
-nearZeroVar(training[,predictors],saveMetrics=T)
-
-trControl <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs=T)
-
-model.rf<-train(topHalf~., data=training, method="rf", preProcess=c("center"), trControl=trControl)
-importance <- varImp(model.rf, scale=FALSE)
-plot(importance)
-
-# rf variable importance
-# 
-#             Overall
-# skew         640.10
-# cost.mean    578.70
-# battlecry    448.47
-# buff         443.34
-# top15        402.52
-# taunt        397.38
-# dmgSpell     394.67
-# draw         366.13
-# blank        358.93
-# rattle       340.63
-# charge       330.31
-# enrage       290.43
-# heal         282.52
-# destroy      257.49
-# silence      216.95
-# aoe          179.41
-# cost.median   61.45
-
-rfControl <- rfeControl(functions=rfFuncs, method="cv", number=10)
-results <- rfe(topHalf~., data=training, sizes=c(1:17), rfeControl=rfControl)
-
-# GBM
-# gbmGrid <-  expand.grid(interaction.depth = c(1, 3, 5),
-#                         n.trees = (1:10)*100,
-#                         shrinkage = c(0.01,0.1))
-
-# 100 trees, interaction depth of 1, shrinkage of 0.1
-
-mage.gbm<-train(topHalf~.,
-                data=training,
-                method='gbm',
-                trControl=trControl,
-                preProc = c("center","scale"))
-
-predictions<-predict(mage.gbm,test[,predictors])
-confusionMatrix(predictions,test$topHalf)
-
-# GBM PCA
-mage.gbmpca<-train(topHalf~.,
-                data=training,
-                method='gbm',
-                trControl=trControl,
-                preProc = "pca")
-
-predictions<-predict(mage.gbmpca,test[,predictors])
-confusionMatrix(predictions,test$topHalf)
-
-
-## RF
-mage.rf<-train(topHalf~.,
-                data=training,
-                method='rf',
-                trControl=trControl,
-                preProc = c("center","scale"))
-
-predictions<-predict(mage.rf,test[,predictors])
-confusionMatrix(predictions,test$topHalf)
+trControl <- trainControl(method="repeatedcv", number=10, repeats=3,
+                          classProbs=T,summaryFunction=twoClassSummary)
 ```
 
+Random forest and gradient boosting machines were both used to classify the mage decks as above average ("Good") or below average ("Bad"). The variables were centered and scaled before the models were trained.
+```{r, eval=FALSE}
+######### Random Forest #########
+set.seed(1337)
+mage.rf<-train(perf~.,
+               data=training[,c(topPredictors,labelName)],
+               method='rf',
+               trControl=trControl,
+               preProc = c("center","scale"))
+
+pred.rf<-predict(mage.rf,test[,c(topPredictors,labelName)])
+perf.rf<-confusionMatrix(predictions,test$perf)
+
+######### GBM #########
+set.seed(1337)
+mage.gbm<-train(perf~.,
+                data=training[,c(topPredictors,labelName)],
+                method='gbm',
+                trControl=trControl,
+                metric="ROC",
+                preProc = c("center","scale"))
+
+pred.gbm<-predict(mage.gbm,test[,c(topPredictors,labelName)])
+perf.gbm<-confusionMatrix(pred.gbm,test$perf)
+```
+
+```{r, echo=FALSE}
+load("perfRF")
+load("perfGBM")
+```
+
+```{r}
+print(perf.rf)
+print(perf.gbm)
+```
+
+Neither method did particularly well at classifying deck outcomes, given the list of predictors. Both Random Forest and GBM produced areas under the ROC curve of approximately 0.65 and 0.68, respectively. This could be good news: it would be bad for game design if anyone could win with a particular deck without having some component of skill.
+
+However, it could be an issue with the models chosen. As an experiment, I removed the middle 50% of the data (between 3 and 7 wins, inclusive) labeling more than 7 wins as "Good" and fewer than 3 wins as "Bad." I hypothesized that very good and very poor decks might be easy to spot, however skill/luck might play a role in blurring the line between good and bad decks with average results. Once the GBM model was trained, the performance was tested against the same (segmented) data.
+
+```{r, eval=FALSE}
+### No Middle ###
+df<- mageSet[mageSet$winCount>7 | mageSet$winCount<3,] %>% # remove the middle 50% of data
+  mutate(perf=as.factor(ifelse(winCount>7,"Good","Bad"))) %>%
+  select(-winCount)
+
+labelName<-"perf" # name of observation
+predictors<-names(df)[!(names(df) %in% labelName)] # predictors
+set.seed(1337)
+labelNum<-which(names(df)==labelName) 
+inTrain<-createDataPartition(y=df$perf,p=0.75,list=F) 
+training<-df[inTrain,]
+test<-df[-inTrain,]
+
+trControl <- trainControl(method="repeatedcv", number=10, repeats=3,
+                          classProbs=T,summaryFunction=twoClassSummary)
+
+set.seed(1337)
+mage.gbmx<-train(perf~.,
+                  data=training[,c(topPredictors,labelName)],
+                  method='gbm',
+                  trControl=trControl,
+                  metric="ROC",
+                  preProc = c("center","scale"))
+
+pred.gbmx<-predict(mage.gbmx,test[,c(topPredictors,labelName)])
+perf.gbmx<-confusionMatrix(pred.gbmx,test$perf)
+
+# get ROC values for plotting using ROCR
+require("ROCR")
+# ROC for entire data set
+prob.gbm<-predict(mage.gbm,test[,c(topPredictors,labelName)],type="prob") # calculate class probabilities
+pred.rocr.gbm<-prediction(prob.gbm$Good,labels=test$perf)
+perf.rocr.gbm<-performance(pred.rocr.gbm,"tpr","fpr") # track true positive rate and false positive rate
+
+# ROC for extremes
+prob.gbmx<-predict(mage.gbmx,test[,c(topPredictors,labelName)],type="prob") # calculate class probabilities
+pred.rocr.x<-prediction(prob.gbmx$Good,labels=test$perf)
+perf.rocr.x<-performance(pred.rocr.x,"tpr","fpr") # track true positive rate and false positive rate
+```
+
+```{r, echo=FALSE, warning=FALSE}
+require("ROCR")
+load("perfROCRx")
+load("perfROCRgbm")
+load("predROCRgbm")
+load("predROCRx")
+fullAUC<-round(unlist(slot(performance(pred.rocr.gbm,"auc"), "y.values")),digits=2)
+xAUC<-round(unlist(slot(performance(pred.rocr.x,"auc"), "y.values")),digits=2)
+plot(perf.rocr.x,lwd=2,col=506,main="GBM Performance for Extremes and Total Data Set")
+# adding min and max ROC AUC
+leg.full <- paste(c("Full Data AUC  = "),fullAUC,sep="")
+leg.x <- paste(c("Extremes AUC = "),xAUC,sep="")
+legend(0.3,0.6,c(leg.x,leg.full,"\n"),border="black",box.col = "white",text.col=c(506,"black"))
+plot(perf.rocr.gbm,add=TRUE,lty=2,col="black",lwd=2)
+```
+
+When testing performance of this "extremes" case on a complete set of data (with the middle 50% re-inserted), performance did not improve substantially. It would appear that average outcomes occur for a variety of reasons, leading to misclassification.
+
+## Conclusions & Future Work
+Modeling deck success based on cards alone seems to be a difficult task. This study looked only factors that would influence an arena run before the games were started. In reality, other factors (still outside of the player's control) weigh in on arena performance such as which hero the opponent is playing and who goes first. Adding these factors would surely improve model accuracy, but would require the completion of an arena run.
+
+There are clearly other factors to consider when characterizing a deck. For example, card combos and synergies were not included. In the future, it would be interesting to see how card synergies, such as those provided at [HearthArena.com](www.heartharena.com) influence model performance.
+
+Finally, although the models themselves were not terribly accurate, the relative importance of predictors such as deck swing and card popularity were supported after the GBM and RF models were trained. This led to the wireframing of a card recommendation system which was covered in a follow-up RPub.
