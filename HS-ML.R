@@ -1,11 +1,15 @@
 setwd("~/GitHub/NYCDSA/Personal Projects/Hearthstone/")
 require(ggplot2)
-require(dplyr)
 require(RMySQL)
 require(lubridate)
 require(e1071)
 require(leaps)
 require(caret)
+require(doMC)
+require(dplyr)
+
+# Multicore setup
+registerDoMC(cores = 3)
 
 # Setup access to the SQL localhost on MAMP
 db <- src_mysql(dbname = 'AMDB', host = 'localhost', user="root", password="root",unix.sock="/Applications/MAMP/tmp/mysql/mysql.sock")
@@ -49,22 +53,24 @@ hasBattlecry<-unlist(lapply(cardPool$cardText,function(x) grepl("Battlecry:",x,i
 hasFreeze<-unlist(lapply(cardPool$cardText,function(x) grepl("Freeze",x,ignore.case=T)))
 hasShield<-unlist(lapply(cardPool$cardText,function(x) grepl("Divine Shield",x,ignore.case=T) & !grepl("lose",x,ignore.case=T)))
 hasBuff<-unlist(lapply(cardPool$cardText,function(x) grepl("\\+[0-9]",x,ignore.case=T)))
+isBlank<-unlist(lapply(cardPool$cardText,function(x) grepl("undefined",x,ignore.case=T)))
 
 # bind these columns to the original stock cards data frame
 card.attr<-data.frame(hasTaunt,
-                hasDraw,
-                hasDestroy,
-                hasAOEdmg,
-                hasSilence,
-                hasCharge,
-                hasHeal,
-                hasDeathrattle,
-                hasEnrage,
-                hasDamage,
-                hasBattlecry,
-                hasFreeze,
-                hasShield,
-                hasBuff)
+                      hasDraw,
+                      hasDestroy,
+                      hasAOEdmg,
+                      hasSilence,
+                      hasCharge,
+                      hasHeal,
+                      hasDeathrattle,
+                      hasEnrage,
+                      hasDamage,
+                      hasBattlecry,
+                      hasFreeze,
+                      hasShield,
+                      hasBuff,
+                      isBlank)
 
 ########## Load and clean the arenaRecords
 unixEpoch<-ymd("1970-01-01")
@@ -121,16 +127,30 @@ fullCardRecord=function(eraStart=release.official,eraEnd=release.naxx,selectsOnl
   return(cardRecord)
 }
 
-# store useful era records in R objects
+# Store data for all-time in R object
 allTime<-fullCardRecord(eraEnd=endofdata,selectsOnly=F)
-vanilla<-fullCardRecord(selectsOnly=F)
-naxx<-fullCardRecord(eraStart=release.naxx,selectsOnly=F)
 
-save(completeRecords, file="completeRecords")
+# Identify IDs with too many duplicates
+dupes<-allTime %>%
+  filter(isSelected==1) %>%
+  group_by(arenaId,cardId) %>%
+  summarise(cardCount=n())
 
-# Function to rank the popularity of cards for high performance decks in a given class
+# 6 or more copies of a card considered unreasonable or questionable for comparison
+dupeIDs<-unique(dupes[dupes$cardCount>=6,1]$arenaId)
+length(dupeIDs)
+
+allTime<-filter(allTime, !(arenaId %in% dupeIDs))
+
+# store useful era records in R objects
+vanilla<-fullCardRecord(selectsOnly=F) %>%
+  filter(!(arenaId %in% dupeIDs))
+naxx<-fullCardRecord(eraStart=release.naxx,selectsOnly=F) %>%
+  filter(!(arenaId %in% dupeIDs))
+
+# Function to rank the popularity of cards for high performance decks in a given class (original release)
 mostPickedCards=function(whichClass,winrate=c(0:12)){
-  cardPoolSpec<-select(filter(allTime,arenaClassId==whichClass),cardId,arenaClassId,isSelected,wins)
+  cardPoolSpec<-select(filter(vanilla,arenaClassId==whichClass),cardId,arenaClassId,isSelected,wins)
   
   popularity<-cardPoolSpec %>%
     filter(wins %in% winrate,                 # only the win rate of interest
@@ -146,11 +166,51 @@ mostPickedCards=function(whichClass,winrate=c(0:12)){
   return(data.frame(popularity,rank=rank(desc(popularity$fractionPicked),ties.method="first")))
 }
 
-# mostPickedCards("Mage",winrate=12)
+# Find Card Swing (difference between having x of that card and 0 of that card)
+copyPerformance=function(whichClass,recordDB){
+  recordsOfInterest<-filter(recordDB,isSelected==1,arenaClassId==whichClass)
+  
+  meanWins<-mean(recordsOfInterest$wins)
+  
+  # Loop through each card to get a 0-4 copy tally of results
+  checkCards=NULL
+  for(i in unique(recordsOfInterest$cardId)) {
+    eachSpread<-recordsOfInterest %>%
+      group_by(wins,arenaId) %>%
+      summarise(copies=sum(cardId==i)) %>%
+      group_by(copies) %>%
+      summarise(deckCount=length(copies),
+                winDiff=mean(wins)-meanWins) %>% # standard error
+      mutate(cardId=i) %>%
+      filter(deckCount>=50) %>%
+      select(-deckCount)
+    checkCards<-rbind(checkCards,eachSpread)
+  }
+  
+  return(checkCards)
+}
+
+mage.cardCopies<-copyPerformance("Mage",vanilla)
+
+# How do decks perform relative to the mean *without* each card
+mage.zeroSwing<-filter(mage.cardCopies,copies==0) %>%
+  rename(baseSwing=winDiff) %>%
+  select(-copies)
+
+mageSwing<-filter(vanilla,arenaClassId=="Mage",isSelected==1) %>%
+  group_by(arenaId,cardId) %>%
+  summarise(copies=n()) %>%
+  left_join(mage.zeroSwing,by=c("cardId")) %>%
+  left_join(mage.cardCopies,by=c("cardId","copies")) %>%
+  rename(copySwing=winDiff) %>%     # the swing for tha tmany copies
+  mutate(cardSwing=ifelse(!is.na(copySwing),copySwing-baseSwing,0)) %>% # the swing generated by that card
+  group_by(arenaId) %>%
+  summarise(deckSwing=sum(cardSwing))
+  
 
 ##### Create feature set
 # For Mage, summarize cards by average of card rank*card attributes
-magesPewPew<-filter(allTime,arenaClassId=="Mage",arenaStartDate<=endofdata)
+magesPewPew<-filter(vanilla,isSelected==1,arenaClassId=="Mage")
 cardPoolRich<-left_join(data.frame(cardPool,card.attr),select(mostPickedCards("Mage",winrate=c(0:12)),cardId,rank),by="cardId")
 cardPoolRich$rank<-ifelse(is.na(cardPoolRich$rank), max(cardPoolRich$rank,na.rm=T)+1,cardPoolRich$rank)
 medWins<-median(magesPewPew$wins)
@@ -163,6 +223,7 @@ mageSet<-magesPewPew %>%
     cost.mean=mean(cardCost),
     cost.median=median(cardCost),
     skew=skewness(cardCost),
+    rarity=mean(as.numeric(cardRarity)),
     taunt=sum(hasTaunt*rank),
     draw=sum(hasDraw*rank),
     destroy=sum(hasDestroy*rank),
@@ -183,100 +244,166 @@ mageSet<-magesPewPew %>%
     avgRank=mean(rank),
     top15=sum(rank<=15)
   ) %>%
+  left_join(mageSwing,by=c("arenaId")) %>%
   select(-arenaId)
 
-## Exploratory: correlation & Heatmaps
+## Exploratory: correlation
 ### Correlation
+require(corrplot)
 corrplot(cor(mageSet),method="ellipse",order="hclust",type="upper")
 
-### Heatmap
-set.seed(1337)
-mageSet.pp <- scale(mageSet, center=T, scale=T)
-hmStrat<-createDataPartition(y=as.factor(mageSet$winCount),p=0.8,list=F) #strat. partition
-heatmap(x=mageSet.pp[-hmStrat,-1]) # heatmap of all predictors
 
-### Exploratory: Linear Model Feature Selection ###
-features.regsubs<-regsubsets(x=winCount ~. , data=mageSet[,-1],nvmax=20)
-df <- data.frame(
-  est = c(summary(features.regsubs)$cp,summary(features.regsubs)$bic,summary(features.regsubs)$adjr2),
-  x = rep(1:20, 3),
-  type = rep(c("cp", "BIC","Adj_r2"), each = 20)
-)
-
-qplot(x, est, data = df, geom = "line" , color=type) +
-  theme_bw() + facet_grid(type ~ ., scales = "free_y")
-
-coef(features.regsubs,7)
-
-features.step <- select(mageSet,-arenaId) 
-null=lm(winCount~1, data=features.step)
-full=lm(winCount~., data=features.step)
-mage.step <- step(null, scope=list(upper=full),data=features.step, direction="both")
-
-
-
-##################################
-######## Time for some ML ########
-##################################
-# Check near-zero variance
-nearZeroVar(training[,predictors],saveMetrics=T)
-
-## Set up training and test sets
-df<- mageSet %>%
-  mutate(topHalf=as.factor(ifelse(winCount>mean(winCount),"Superior","Inferior"))) %>%
-  select(-winCount)
-labelName<-"topHalf" # name of observation
-predictors<-names(df)[!(names(df) %in% labelName)] # predictors
-set.seed(1337)
-labelNum<-which(names(df)==labelName) 
-inTrain<-createDataPartition(y=df$topHalf,p=0.75,list=F) # create stratified partition, based on observation
-training<-df[inTrain,]
-test<-df[-inTrain,]
-
-trControl <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs=T)
-
-mage.gbm<-train(topHalf~.,
-                data=training,
-                method='gbm',
-                trControl=trControl,
-                preProc = c("center","scale"))
-
-predictions<-predict(mage.gbm,test[,predictors])
-perf.gbm<-confusionMatrix(predictions,test$topHalf)
-
-
-######### Can PCA be Used? #########
+######## Can PCA be Used? ########
 require(psych)
 df.scale <- scale(mageSet, center=T, scale=T)
 df.pca<- principal(r=df.scale,
                    nfactors=10,
                    covar=FALSE)
 
-head(df.pca$scores)
-# transformed coordinates along each PCA
-
-# Plot pairs for df.pca
-pairs(df.pca$scores[-inTrain,],col=df$topHalf[-inTrain])
-
 KMO(cor(as.matrix(df.scale)))
-### Overall MSA > 0.7, PCA should be okay
+### Overall MSA = 0.58, PCA may not help.
 
-######### Proceed to GBM with PCA #########
-mage.gbmpca<-train(topHalf~.,
-                   data=training,
-                   method='gbm',
-                   trControl=trControl,
-                   preProc = "pca")
 
-predictions<-predict(mage.gbmpca,test[,predictors])
-perf.gbmpca<-confusionMatrix(predictions,test$topHalf)
+##################################
+### Machine Learning/Modeling ####
+##################################
 
-######### Proceed to RF #########
-mage.rf<-train(topHalf~.,
-               data=training,
+## Set up training and test sets
+df<- mageSet %>%
+  mutate(perf=as.factor(ifelse(winCount>mean(winCount),"Good","Bad"))) %>%
+  select(-winCount)
+
+labelName<-"perf" # name of observation
+predictors<-names(df)[!(names(df) %in% labelName)] # predictors
+set.seed(1337)
+labelNum<-which(names(df)==labelName) 
+inTrain<-createDataPartition(y=df$perf,p=0.75,list=F) 
+training<-df[inTrain,]
+test<-df[-inTrain,]
+
+# Check near-zero variance
+nearZeroVar(training[,predictors],saveMetrics=T)
+
+
+trControl <- trainControl(method="repeatedcv", number=10, repeats=3,
+                          classProbs=T,summaryFunction=twoClassSummary)
+
+
+##### Select Features with RFE
+# define the control using a recursive variable selection function
+rfeControl <- rfeControl(functions=rfFuncs, method="cv", number=10)
+set.seed(1337)
+mage.rfe <- rfe(training[,predictors], training$perf, sizes=c(1:20), rfeControl=rfeControl)
+print(mage.rfe)
+topPredictors<-predictors(mage.rfe) # store the subset of most important features
+plot(mage.rfe, type=c("g", "o")) # Plot performance vs. number of variables
+save(mage.rfe,file="mageRFE")
+
+######### Try RF #########
+set.seed(1337)
+mage.rf<-train(perf~.,
+               data=training[,c(topPredictors,labelName)],
                method='rf',
                trControl=trControl,
                preProc = c("center","scale"))
 
-predictions<-predict(mage.rf,test[,predictors])
-perf.rf<-confusionMatrix(predictions,test$topHalf)
+pred.rf<-predict(mage.rf,test[,c(topPredictors,labelName)])
+perf.rf<-confusionMatrix(pred.rf,test$perf)
+# varImp(mage.rf)
+# plot(varImp(mage.rf, scale=T)) # plot the variable importance
+
+
+######### GBM #########
+set.seed(1337)
+mage.gbm<-train(perf~.,
+                data=training[,c(topPredictors,labelName)],
+                method='gbm',
+                trControl=trControl,
+                metric="ROC",
+                preProc = c("center","scale"))
+
+pred.gbm<-predict(mage.gbm,test[,c(topPredictors,labelName)])
+perf.gbm<-confusionMatrix(pred.gbm,test$perf)
+prob.gbm<-predict(mage.gbm,test[,c(topPredictors,labelName)],type="prob")
+plot.roc(roc(response=test$perf,prob.gbm2c$Good))
+
+pred.rocr.gbm<-prediction(prob.gbm$Good,labels=test$perf)
+perf.rocr.gbm<-performance(pred.rocr.gbm,"tpr","fpr")
+
+
+##### No Middle #####
+df<- mageSet[mageSet$winCount>7 | mageSet$winCount<3,] %>%
+  mutate(perf=as.factor(ifelse(winCount>7,"Good","Bad"))) %>%
+  select(-winCount)
+
+labelName<-"perf" # name of observation
+predictors<-names(df)[!(names(df) %in% labelName)] # predictors
+set.seed(1337)
+labelNum<-which(names(df)==labelName) 
+inTrain<-createDataPartition(y=df$perf,p=0.75,list=F) 
+training<-df[inTrain,]
+test<-df[-inTrain,]
+
+# Check near-zero variance
+nearZeroVar(training[,predictors],saveMetrics=T)
+
+
+trControl <- trainControl(method="repeatedcv", number=10, repeats=3,
+                          classProbs=T,summaryFunction=twoClassSummary)
+
+set.seed(1337)
+mage.gbmx<-train(perf~.,
+                  data=training[,c(topPredictors,labelName)],
+                  method='gbm',
+                  trControl=trControl,
+                  metric="ROC",
+                  preProc = c("center","scale"))
+
+pred.gbmx<-predict(mage.gbmx,test[,c(topPredictors,labelName)])
+perf.gbmx<-confusionMatrix(pred.gbmx,test$perf)
+prob.gbmx<-predict(mage.gbmx,test[,c(topPredictors,labelName)],type="prob")
+plot.roc(roc(response=test$perf,prob.gbmx$Good))
+
+pred.rocr.x<-prediction(prob.gbmx$Good,labels=test$perf)
+perf.rocr.x<-performance(pred.rocr.x,"tpr","fpr")
+
+plot(perf.rocr.x,lwd=2,col=506,main="GBM Performance for Extremes and Total Data Set")
+plot(perf.rocr.gbm,add=TRUE,lty=2,col="black",lwd=2)
+
+
+pred.gbmx.full<-predict(mage.gbmx,test[,c(topPredictors,labelName)])
+perf.gbmx.full<-confusionMatrix(pred.gbmx.full,test$perf)
+prob.gbmx.full<-predict(mage.gbmx,test[,c(topPredictors,labelName)],type="prob")
+plot.roc(roc(response=test$perf,prob.gbmx.full$Good))
+
+
+
+
+
+##### Stuff that didn't really work #####
+##### GLM #####
+df<- mageSet
+
+labelName<-"winCount" # name of observation
+predictors<-names(df)[!(names(df) %in% labelName)] # predictors
+set.seed(1337)
+labelNum<-which(names(df)==labelName) 
+inTrain<-createDataPartition(y=df$winCount,p=0.75,list=F) 
+training<-df[inTrain,]
+test<-df[-inTrain,]
+
+# Check near-zero variance
+nearZeroVar(training[,predictors],saveMetrics=T)
+
+
+trControl <- trainControl(method="repeatedcv", number=10, repeats=3)
+set.seed(1337)
+mage.glm<-train(winCount~.,
+                data=training,
+                method='bayesglm',
+                trControl=trControl,
+                preProc = c("center","scale"))
+
+pred.glm<-predict(mage.glm,test[,predictors])
+perf.glm<-confusionMatrix(pred.glm,test$winCount)
+plot.roc(roc(response=test$winCount,pred.glm))
